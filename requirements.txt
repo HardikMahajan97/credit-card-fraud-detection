@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────
+# Real-Time Credit Card Fraud Detection
+# Python 3.13 + macOS Apple Silicon compatible
+#
+# INSTALL ORDER:
+#   Step 1: pip install torch torchvision
+#   Step 2: pip install torch-geometric
+#   Step 3: pip install -r requirements.txt
+#
+# DO NOT install torch-scatter, torch-sparse, torch-cluster —
+# these C++ extensions crash on macOS + Python 3.13.
+# This project uses only pure PyTorch ops and does not need them.
+# ─────────────────────────────────────────────────────────────
+
+numpy>=1.26.4
+pandas>=2.2.2
+scikit-learn>=1.5.0
+tqdm>=4.66.4
+matplotlib>=3.9.0
+seaborn>=0.13.2
+kafka-python>=2.0.2
+
+# ── LLM explainability (optional) ────────────────────────────
+# openai>=1.35.0
+# anthropic>=0.29.0
+
+# ── Real dataset loading (optional) ──────────────────────────
+# kagglehub>=0.2.9
