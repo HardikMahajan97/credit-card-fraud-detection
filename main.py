@@ -362,15 +362,21 @@ def run_merge(args):
 
 def _parse_transaction_args(args):
     if args.transaction_json:
-        return json.loads(args.transaction_json)
+        try:
+            return json.loads(args.transaction_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid --transaction-json payload: {e}") from e
     if args.transaction_file:
-        return json.loads(Path(args.transaction_file).read_text())
-    if args.card_id and args.merchant_id and args.device_id:
+        try:
+            return json.loads(Path(args.transaction_file).read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in --transaction-file '{args.transaction_file}': {e}") from e
+    if all(isinstance(v, str) and v.strip() for v in [args.card_id, args.merchant_id, args.device_id]):
         return {
             "transaction_id": args.transaction_id or "manual_txn",
-            "card_id": args.card_id,
-            "merchant_id": args.merchant_id,
-            "device_id": args.device_id,
+            "card_id": args.card_id.strip(),
+            "merchant_id": args.merchant_id.strip(),
+            "device_id": args.device_id.strip(),
             "amount": float(args.amount or 0),
             "timestamp": args.timestamp or pd.Timestamp.utcnow().isoformat(),
             "merchant_category": args.merchant_category or "unknown",

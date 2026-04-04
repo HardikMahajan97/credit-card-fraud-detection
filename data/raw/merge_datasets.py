@@ -4,6 +4,12 @@ import pandas as pd
 
 
 def merge_datasets(mockaroo_files, generated_path, output_path):
+    missing = [str(p) for p in mockaroo_files if not Path(p).exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing Mockaroo files: {', '.join(missing)}")
+    if not Path(generated_path).exists():
+        raise FileNotFoundError(f"Generated dataset not found: {generated_path}")
+
     mock_dfs = [pd.read_csv(str(p)) for p in mockaroo_files]
     mockaroo_df = pd.concat(mock_dfs, ignore_index=True)
     mockaroo_df = mockaroo_df.rename(columns={
