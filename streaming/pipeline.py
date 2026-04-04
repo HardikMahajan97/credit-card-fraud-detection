@@ -103,11 +103,11 @@ class StreamingFraudPipeline:
                 self.graph.edge_index_dict[key] = new_col
             else:
                 self.graph.edge_index_dict[key] = torch.cat([ei, new_col], dim=1)
+            self._ei_dict[key] = self.graph.edge_index_dict[key].to(self.device)
 
         _append_edge(("card", "pays", "merchant"), c_idx, m_idx)
         _append_edge(("card", "uses", "device"), c_idx, d_idx)
         _append_edge(("device", "seen_at", "merchant"), d_idx, m_idx)
-        self._ei_dict = {k: v.to(self.device) for k, v in self.graph.edge_index_dict.items()}
 
     def _features(self, txn):
         ts = pd.Timestamp(txn.get("timestamp", datetime.now().isoformat()))
