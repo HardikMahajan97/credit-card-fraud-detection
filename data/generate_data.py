@@ -41,7 +41,7 @@ DEVICE_TYPES = ["mobile", "desktop", "tablet", "pos_terminal"]
 CHANNELS = ["online", "in_store", "atm", "contactless"]
 
 
-def generate_customers(n=500):
+def generate_customers(n=5000):
     customers = []
     for i in range(n):
         customers.append({
@@ -70,7 +70,7 @@ def generate_cards(customers_df):
     return pd.DataFrame(cards)
 
 
-def generate_merchants(n=200):
+def generate_merchants(n=2000):
     merchants = []
     for i in range(n):
         cat = random.choice(MERCHANT_CATEGORIES)
@@ -85,7 +85,7 @@ def generate_merchants(n=200):
     return pd.DataFrame(merchants)
 
 
-def generate_devices(n=800):
+def generate_devices(n=8000):
     devices = []
     for i in range(n):
         devices.append({
@@ -97,7 +97,7 @@ def generate_devices(n=800):
     return pd.DataFrame(devices)
 
 
-def generate_transactions(cards_df, merchants_df, devices_df, n=50000):
+def generate_transactions(cards_df, merchants_df, devices_df, n=200000):
     transactions = []
     start_date = datetime(2023, 1, 1)
     card_ids = cards_df["card_id"].tolist()
