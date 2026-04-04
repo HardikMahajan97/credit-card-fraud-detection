@@ -69,6 +69,10 @@ def _artifact_paths(config):
     }
 
 
+def _explainer_embedding_dim(config):
+    return int(config["hidden_dim"]) // 2
+
+
 def _persist_artifacts(config, builder, graph, sequences, explainer):
     paths = _artifact_paths(config)
     Path(config["checkpoint_dir"]).mkdir(parents=True, exist_ok=True)
@@ -110,8 +114,10 @@ def _load_runtime_for_inference(config):
     model.load_state_dict(state)
     model.eval()
 
-    explainer = FraudExplainer.load(str(paths["explainer"])) if paths["explainer"].exists() else FraudExplainer(
-        embedding_dim=merged_config["hidden_dim"] // 2
+    explainer = (
+        FraudExplainer.load(str(paths["explainer"]))
+        if paths["explainer"].exists()
+        else FraudExplainer(embedding_dim=_explainer_embedding_dim(merged_config))
     )
     return merged_config, model, builder, graph, sequences, explainer, merchant_map, device_map
 
@@ -268,7 +274,7 @@ def run_train(config, run_stream=True):
     trained_model, _ = train(model, train_ds, val_ds, graph, config, config["checkpoint_dir"])
 
     test_metrics = run_test_eval(trained_model, graph, sequences, test_df, builder.card_enc, config)
-    explainer = FraudExplainer(embedding_dim=config["hidden_dim"] // 2)
+    explainer = FraudExplainer(embedding_dim=_explainer_embedding_dim(config))
     populate_rag(trained_model, graph, sequences, train_df, builder.card_enc, explainer, config)
     _persist_artifacts(config, builder, graph, sequences, explainer)
 
@@ -371,7 +377,12 @@ def _parse_transaction_args(args):
             return json.loads(Path(args.transaction_file).read_text())
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON in --transaction-file '{args.transaction_file}': {e}") from e
-    if all(isinstance(v, str) and v.strip() for v in [args.card_id, args.merchant_id, args.device_id]):
+    missing = [name for name, v in {
+        "card-id": args.card_id,
+        "merchant-id": args.merchant_id,
+        "device-id": args.device_id,
+    }.items() if v is None or not isinstance(v, str) or not v.strip()]
+    if not missing:
         return {
             "transaction_id": args.transaction_id or "manual_txn",
             "card_id": args.card_id.strip(),
@@ -383,7 +394,10 @@ def _parse_transaction_args(args):
             "channel": args.channel or "pos",
             "is_international": int(args.is_international or 0),
         }
-    raise ValueError("Provide --transaction-json, --transaction-file, or card/merchant/device fields.")
+    raise ValueError(
+        "Provide --transaction-json, --transaction-file, or non-empty "
+        "--card-id/--merchant-id/--device-id fields."
+    )
 
 
 def parse_args():
