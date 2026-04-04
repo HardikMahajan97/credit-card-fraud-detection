@@ -22,19 +22,21 @@ CONFIG = {
     "gnn_out_dim": 64,
     "transformer_out_dim": 64,
     "hidden_dim": 256,
-    "dropout": 0.25,
+    "dropout": 0.3,
     "use_anomaly_heads": True,
-    "epochs": 15,
+    "epochs": 20,
     "batch_size": 256,
     "lr": 1e-3,
-    "weight_decay": 1e-4,
-    "patience": 5,
+    "weight_decay": 5e-4,
+    "patience": 7,
+    "lr_patience": 3,
+    "scheduler": "reduce_on_plateau",
 
     # Imbalance & decisioning
     "imbalance_mode": "weighted_sampler",
-    "pos_weight": 6.0,
+    "pos_weight": 8.0,
     "focal_alpha": 0.5,
-    "focal_gamma": 2.0,
+    "focal_gamma": 2.5,
     "use_calibration": True,
     "threshold_objective": "f1",
     "threshold": 0.5,
@@ -138,12 +140,33 @@ def run_test_eval(model, graph, sequences, test_df, card_enc, config):
             calibrator = PlattCalibrator(a=cal.get("a", 1.0), b=cal.get("b", 0.0))
 
     metrics, _, _ = evaluate(model, test_loader, graph, FocalLoss(), device, threshold=threshold, calibrator=calibrator)
-    print("\n" + "="*50)
+
+    # ── Standard metrics table ───────────────────────────────────────────────
+    print("\n" + "="*55)
     print("  FINAL TEST RESULTS")
-    print("="*50)
+    print("="*55)
     for k, v in metrics.items():
-        print(f"  {k:<20}: {v:.4f}" if isinstance(v, float) else f"  {k:<20}: {v}")
-    print("="*50)
+        print(f"  {k:<22}: {v:.4f}" if isinstance(v, float) else f"  {k:<22}: {v}")
+    print("="*55)
+
+    # ── Composite evaluation score ───────────────────────────────────────────
+    accuracy  = metrics.get("accuracy",  0.0)
+    f1        = metrics.get("f1",        0.0)
+    roc_auc   = metrics.get("roc_auc",   0.0)
+    composite = 0.2 * accuracy + 0.4 * f1 + 0.4 * roc_auc
+    metrics["composite_score"] = composite
+
+    print("\n" + "="*55)
+    print("  COMPOSITE EVALUATION SCORE")
+    print("="*55)
+    print(f"  {'Accuracy':<22}: {accuracy:.4f}")
+    print(f"  {'F1 Score':<22}: {f1:.4f}")
+    print(f"  {'ROC-AUC':<22}: {roc_auc:.4f}")
+    print("-"*55)
+    print(f"  {'Composite Score':<22}: {composite:.4f}")
+    print(f"  {'  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)'}")
+    print("="*55)
+
     return metrics
 
 
@@ -220,6 +243,23 @@ def main():
 
     print(f"\n[Main] ✓ Outputs saved to {out}/")
     print(f"[Main] Stream stats:\n{json.dumps(stream_stats, indent=2)}")
+
+    # ── Final composite score recap (always last output line) ────────────────
+    accuracy  = test_metrics.get("accuracy",        0.0)
+    f1        = test_metrics.get("f1",              0.0)
+    roc_auc   = test_metrics.get("roc_auc",         0.0)
+    composite = test_metrics.get("composite_score", 0.2 * accuracy + 0.4 * f1 + 0.4 * roc_auc)
+    print("\n" + "="*60)
+    print("  FINAL COMPOSITE EVALUATION SCORE (Test Set)")
+    print("="*60)
+    print(f"  {'Accuracy':<28}: {accuracy:.4f}")
+    print(f"  {'F1 Score':<28}: {f1:.4f}")
+    print(f"  {'ROC-AUC':<28}: {roc_auc:.4f}")
+    print("-"*60)
+    print(f"  {'Composite Score':<28}: {composite:.4f}  ★")
+    print(f"  {'  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)'}")
+    print("="*60)
+
     print("[Main] Done.")
 
 

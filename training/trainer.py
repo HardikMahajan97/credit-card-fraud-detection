@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from sklearn.metrics import (
+    accuracy_score,
     precision_score, recall_score, f1_score,
     roc_auc_score, average_precision_score, confusion_matrix,
     precision_recall_curve,
@@ -115,6 +116,7 @@ def compute_metrics(y_true, y_pred_prob, threshold=0.5):
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0,1]).ravel()
     n_pos = y_true.sum()
     return {
+        "accuracy":  accuracy_score(y_true, y_pred),
         "precision": precision_score(y_true, y_pred, zero_division=0),
         "recall":    recall_score(y_true, y_pred, zero_division=0),
         "f1":        f1_score(y_true, y_pred, zero_division=0),
@@ -263,8 +265,22 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
     optimizer = torch.optim.AdamW(model.parameters(),
                                   lr=config.get("lr", 1e-3),
                                   weight_decay=config.get("weight_decay", 1e-4))
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config.get("epochs", 15), eta_min=1e-5)
+
+    # Adaptive scheduler: ReduceLROnPlateau monitors val-F1 and halves LR on
+    # plateau, giving the model more room to escape flat regions.  Falls back to
+    # CosineAnnealingLR when the config explicitly requests it.
+    scheduler_type = config.get("scheduler", "reduce_on_plateau")
+    if scheduler_type == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=config.get("epochs", 15), eta_min=1e-5)
+    else:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",           # maximise val-F1
+            factor=0.5,
+            patience=config.get("lr_patience", 3),
+            min_lr=1e-6,
+        )
 
     # Loss config
     alpha = float(config.get("focal_alpha", 0.25))
@@ -298,11 +314,17 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
         val_m2["threshold"] = float(best_threshold)
         val_m2["calibration"] = calibrator.state_dict() if calibrator is not None else None
 
-        scheduler.step()
+        # Step scheduler: ReduceLROnPlateau needs the monitored metric;
+        # CosineAnnealingLR takes no argument.
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(val_m2["f1"])
+        else:
+            scheduler.step()
 
         print(
             f"Epoch {epoch:3d} | loss={train_loss:.4f} | "
-            f"f1={val_m2['f1']:.4f} | pr_auc={val_m2['pr_auc']:.4f} | "
+            f"acc={val_m2['accuracy']:.4f} | f1={val_m2['f1']:.4f} | "
+            f"roc_auc={val_m2['roc_auc']:.4f} | pr_auc={val_m2['pr_auc']:.4f} | "
             f"prec={val_m2['precision']:.4f} | rec={val_m2['recall']:.4f} | "
             f"thr={val_m2['threshold']:.3f} | {time.time()-t0:.1f}s"
         )
@@ -327,5 +349,19 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
     with open(f"{save_dir}/training_history.json", "w") as f:
         json.dump(history, f, indent=2)
 
+    # ── Composite training summary ──────────────────────────────────────────
+    best_epoch_m = max(history, key=lambda h: h.get("f1", 0.0)) if history else {}
+    best_acc     = best_epoch_m.get("accuracy", 0.0)
+    best_f1_hist = best_epoch_m.get("f1", 0.0)
+    best_roc     = best_epoch_m.get("roc_auc", 0.0)
+    composite    = 0.2 * best_acc + 0.4 * best_f1_hist + 0.4 * best_roc
     print(f"[Trainer] Done. Best F1={best_f1:.4f}")
+    print("\n" + "="*60)
+    print("  TRAINING COMPOSITE SCORE SUMMARY")
+    print("="*60)
+    print(f"  {'Accuracy':<22}: {best_acc:.4f}")
+    print(f"  {'F1 Score':<22}: {best_f1_hist:.4f}")
+    print(f"  {'ROC-AUC':<22}: {best_roc:.4f}")
+    print(f"  {'Composite Score':<22}: {composite:.4f}  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)")
+    print("="*60)
     return model, history
