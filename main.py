@@ -185,10 +185,9 @@ def populate_rag(model, graph, sequences, txn_df, card_enc, explainer, config):
                 ).astype(np.float32),
                 device=device,
             )
-            seqs = torch.tensor(
-                np.stack([sequences.get(c, np.zeros((config["seq_len"], 6))) for c in batch["card_id"]], axis=0).astype(np.float32),
-                device=device,
-            )
+            default_seq = np.zeros((config["seq_len"], 6), dtype=np.float32)
+            batch_seqs = [sequences.get(c, default_seq) for c in batch["card_id"]]
+            seqs = torch.tensor(np.stack(batch_seqs, axis=0).astype(np.float32), device=device)
             _, embs, _ = model(x_dict, ei_dict, cidx, seqs, raw)
             all_embs.append(embs["fused_emb"])
             all_labels.append(torch.tensor(batch["is_fraud"].values, dtype=torch.float))
@@ -381,12 +380,12 @@ def _parse_transaction_args(args):
             return json.loads(Path(args.transaction_file).read_text())
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON in --transaction-file '{args.transaction_file}': {e}") from e
-    invalid_fields = [name for name, v in {
+    fields_with_invalid_values = [name for name, v in {
         "card-id": args.card_id,
         "merchant-id": args.merchant_id,
         "device-id": args.device_id,
     }.items() if v is None or not isinstance(v, str) or not v.strip()]
-    if not invalid_fields:
+    if not fields_with_invalid_values:
         return {
             "transaction_id": args.transaction_id or "manual_txn",
             "card_id": args.card_id.strip(),
@@ -400,7 +399,7 @@ def _parse_transaction_args(args):
         }
     raise ValueError(
         "Provide --transaction-json, --transaction-file, or non-empty "
-        "--card-id/--merchant-id/--device-id fields."
+        f"--card-id/--merchant-id/--device-id fields. Invalid: {fields_with_invalid_values}"
     )
 
 
