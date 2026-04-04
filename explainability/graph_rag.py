@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from typing import List, Dict, Optional
 import json
+import pickle
+from pathlib import Path
 
 
 class FraudExplainer:
@@ -269,3 +271,32 @@ and provide a concise, professional explanation of why it was flagged as potenti
 Keep your response under 200 words.
 """
         return prompt
+
+    def save(self, path: str):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "embedding_dim": self.embedding_dim,
+            "max_memory": self.max_memory,
+            "top_k": self.top_k,
+            "fraud_embeddings": self.fraud_embeddings,
+            "fraud_metadata": self.fraud_metadata,
+            "normal_embeddings": self.normal_embeddings,
+            "normal_metadata": self.normal_metadata,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(payload, f)
+
+    @classmethod
+    def load(cls, path: str):
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+        obj = cls(
+            embedding_dim=payload.get("embedding_dim", 32),
+            max_memory=payload.get("max_memory", 5000),
+            top_k=payload.get("top_k", 5),
+        )
+        obj.fraud_embeddings = payload.get("fraud_embeddings", [])
+        obj.fraud_metadata = payload.get("fraud_metadata", [])
+        obj.normal_embeddings = payload.get("normal_embeddings", [])
+        obj.normal_metadata = payload.get("normal_metadata", [])
+        return obj

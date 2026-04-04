@@ -123,20 +123,56 @@ pip install -r requirements.txt
 
 ## Running the Pipeline
 
-### Full end-to-end run (generates data, trains, evaluates, streams):
+### Full end-to-end train/eval/stream run:
 
 ```bash
 python main.py
+# or explicitly:
+python main.py train
 ```
 
 This will:
-1. **Generate** 50,000 synthetic transactions (cards, merchants, devices, customers)
-2. **Build** a heterogeneous transaction graph (PyG HeteroData)
-3. **Train** the GNN + Transformer fusion model (~15 epochs)
-4. **Evaluate** on held-out test set (precision, recall, F1, ROC-AUC, PR-AUC)
-5. **Populate** Graph RAG memory with labeled embeddings
-6. **Simulate** 200 real-time transactions through the streaming pipeline
-7. **Save** all results to `outputs/`
+1. **Load or generate** transactions and entity tables
+2. **Build** graph + temporal sequences
+3. **Train** GNN + Transformer fusion model
+4. **Evaluate** on test set and print a formatted metrics report in stdout
+5. **Populate** Graph RAG memory
+6. **Persist** training artifacts for later predict-only usage
+7. **Simulate** streaming (unless disabled)
+8. **Save** outputs to `outputs/`
+
+### Train only (skip streaming simulation):
+```bash
+python main.py train --no-stream
+```
+
+### Predict one transaction without retraining:
+```bash
+python main.py predict \
+  --card-id CARD_00001 \
+  --merchant-id MERCH_0001 \
+  --device-id DEV_0001 \
+  --amount 129.5 \
+  --timestamp "2026-01-01T12:00:00" \
+  --merchant-category grocery \
+  --channel online \
+  --is-international 0
+```
+
+### Predict with graph edge update:
+```bash
+python main.py predict --transaction-file /absolute/path/to/txn.json --update-graph
+```
+
+### Update graph only (no scoring):
+```bash
+python main.py update-graph --transaction-json '{"card_id":"CARD_00001","merchant_id":"MERCH_0001","device_id":"DEV_0001"}'
+```
+
+### Merge generated + Mockaroo datasets:
+```bash
+python main.py merge --output data/raw/final_merged_dataset.csv
+```
 
 Expected runtime:
 - CPU: ~8–15 minutes (depending on machine)
@@ -149,6 +185,11 @@ Expected runtime:
 ### Generate data only:
 ```bash
 python -m data.generate_data
+```
+
+### Merge datasets module directly:
+```bash
+python -m data.raw.merge_datasets --output data/raw/final_merged_dataset.csv
 ```
 
 ### Build graph only:
@@ -255,7 +296,7 @@ All key hyperparameters live in `main.py` at the top in the `CONFIG` dict:
 
 ## Outputs
 
-After `python main.py`, the `outputs/` folder will contain:
+After training (`python main.py` or `python main.py train`), the `outputs/` folder will contain:
 
 | File | Contents |
 |------|----------|
@@ -269,7 +310,13 @@ The `models/checkpoints/` folder will contain:
 | File | Contents |
 |------|----------|
 | `best_model.pt` | Best model weights (by val F1) |
+| `best_threshold.json` | Tuned threshold + calibration parameters |
 | `training_history.json` | Per-epoch metrics |
+| `graph_builder.pkl` | Encoders + scaler used during training |
+| `graph.pkl` | Serialized graph + merchant/device index maps |
+| `sequences.pkl` | Per-card temporal sequence dictionary |
+| `explainer.pkl` | Persisted Graph-RAG memory |
+| `training_config.json` | Config used for artifact-compatible predict runs |
 
 ---
 
