@@ -82,6 +82,8 @@ class StreamingFraudPipeline:
         logger.info(f"StreamingFraudPipeline ready (threshold={self.threshold:.3f}, calibrated={self.calibration is not None})")
 
     def update_graph(self, txn):
+        if not hasattr(self, "_ei_dict"):
+            self._ei_dict = {}
         card_id = txn.get("card_id")
         merchant_id = txn.get("merchant_id")
         device_id = txn.get("device_id")

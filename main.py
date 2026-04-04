@@ -50,6 +50,7 @@ CONFIG = {
     "threshold": 0.5,
     "stream_n_transactions": 200,
     "stream_delay_ms": 5,
+    "rag_sample_size": 3000,
     "data_dir": "data/raw",
     "checkpoint_dir": "models/checkpoints",
     "output_dir": "outputs",
@@ -110,7 +111,7 @@ def _load_runtime_for_inference(config):
     device_map = graph_payload.get("device_map", {})
 
     model = build_model(merged_config)
-    state = torch.load(paths["model"], map_location=torch.device("cpu"))
+    state = torch.load(paths["model"], map_location=torch.device("cpu"), weights_only=True)
     model.load_state_dict(state)
     model.eval()
 
@@ -157,7 +158,10 @@ def populate_rag(model, graph, sequences, txn_df, card_enc, explainer, config):
     x_dict = {k: v.to(device) for k, v in graph.x_dict.items()}
     ei_dict = {k: v.to(device) for k, v in graph.edge_index_dict.items()}
     known = set(card_enc.classes_)
-    sample = txn_df[txn_df["card_id"].isin(known)].sample(min(3000, len(txn_df)), random_state=42).reset_index(drop=True)
+    sample = txn_df[txn_df["card_id"].isin(known)].sample(
+        min(config.get("rag_sample_size", 3000), len(txn_df)),
+        random_state=42,
+    ).reset_index(drop=True)
     bs = 256
     all_embs, all_labels, all_meta = [], [], []
 
@@ -377,12 +381,12 @@ def _parse_transaction_args(args):
             return json.loads(Path(args.transaction_file).read_text())
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON in --transaction-file '{args.transaction_file}': {e}") from e
-    missing = [name for name, v in {
+    invalid_fields = [name for name, v in {
         "card-id": args.card_id,
         "merchant-id": args.merchant_id,
         "device-id": args.device_id,
     }.items() if v is None or not isinstance(v, str) or not v.strip()]
-    if not missing:
+    if not invalid_fields:
         return {
             "transaction_id": args.transaction_id or "manual_txn",
             "card_id": args.card_id.strip(),
