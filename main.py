@@ -164,7 +164,7 @@ def run_test_eval(model, graph, sequences, test_df, card_enc, config):
     print(f"  {'ROC-AUC':<22}: {roc_auc:.4f}")
     print("-"*55)
     print(f"  {'Composite Score':<22}: {composite:.4f}")
-    print(f"  {'  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)'}")
+    print("  (0.2\u00d7Acc + 0.4\u00d7F1 + 0.4\u00d7ROC-AUC)")
     print("="*55)
 
     return metrics
@@ -257,7 +257,7 @@ def main():
     print(f"  {'ROC-AUC':<28}: {roc_auc:.4f}")
     print("-"*60)
     print(f"  {'Composite Score':<28}: {composite:.4f}  ★")
-    print(f"  {'  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)'}")
+    print("  (0.2\u00d7Acc + 0.4\u00d7F1 + 0.4\u00d7ROC-AUC)")
     print("="*60)
 
     print("[Main] Done.")
