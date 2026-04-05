@@ -4,6 +4,7 @@ Main Pipeline Orchestrator — Python 3.13 / macOS safe.
 
 import argparse
 import json
+import logging
 import os
 import pickle
 import sys
@@ -21,7 +22,7 @@ from explainability.graph_rag import FraudExplainer
 from graph.graph_builder import FraudGraphBuilder, build_temporal_sequences
 from models.fusion_model import FocalLoss, build_model
 from streaming.pipeline import StreamingFraudPipeline, simulate_streaming
-from training.trainer import PlattCalibrator, TransactionDataset, evaluate, train
+from training.trainer import PlattCalibrator, TransactionDataset, evaluate, train, fraud_kpis, fraud_composite_score
 
 CONFIG = {
     "n_transactions": 50000,
@@ -164,6 +165,7 @@ def populate_rag(model, graph, sequences, txn_df, card_enc, explainer, config):
     ).reset_index(drop=True)
     bs = 256
     all_embs, all_labels, all_meta = [], [], []
+    _warned_emb_health = False  # warn at most once across batches
 
     model.eval()
     with torch.no_grad():
@@ -189,7 +191,25 @@ def populate_rag(model, graph, sequences, txn_df, card_enc, explainer, config):
             batch_seqs = [sequences.get(c, default_seq) for c in batch["card_id"]]
             seqs = torch.tensor(np.stack(batch_seqs, axis=0).astype(np.float32), device=device)
             _, embs, _ = model(x_dict, ei_dict, cidx, seqs, raw)
-            all_embs.append(embs["fused_emb"])
+            fused = embs["fused_emb"]
+
+            # Embedding health check — warn once if NaN/inf/near-zero detected
+            if not _warned_emb_health:
+                emb_np = fused.cpu().numpy()
+                n_nan  = int(np.isnan(emb_np).any(axis=1).sum())
+                n_inf  = int(np.isinf(emb_np).any(axis=1).sum())
+                norms  = np.linalg.norm(emb_np, axis=1)
+                n_zero = int((norms < 1e-6).sum())
+                if n_nan or n_inf or n_zero:
+                    logging.warning(
+                        "[populate_rag] Fused embedding health: %d NaN, %d inf, "
+                        "%d near-zero out of %d — potential training instability. "
+                        "Embeddings will be sanitized by FraudExplainer.",
+                        n_nan, n_inf, n_zero, len(emb_np),
+                    )
+                    _warned_emb_health = True
+
+            all_embs.append(fused)
             all_labels.append(torch.tensor(batch["is_fraud"].values, dtype=torch.float))
             all_meta.extend(batch.to_dict("records"))
 
@@ -215,22 +235,32 @@ def run_test_eval(model, graph, sequences, test_df, card_enc, config):
         if cal:
             calibrator = PlattCalibrator(a=cal.get("a", 1.0), b=cal.get("b", 0.0))
 
-    metrics, _, _ = evaluate(model, test_loader, graph, FocalLoss(), device, threshold=threshold, calibrator=calibrator)
-    accuracy = metrics.get("accuracy", 0.0)
+    metrics, y_true, y_prob = evaluate(model, test_loader, graph, FocalLoss(), device, threshold=threshold, calibrator=calibrator)
     f1 = metrics.get("f1", 0.0)
     roc_auc = metrics.get("roc_auc", 0.0)
-    composite = 0.2 * accuracy + 0.4 * f1 + 0.4 * roc_auc
-    metrics["composite_score"] = composite
+    pr_auc = metrics.get("pr_auc", 0.0)
+    composite = fraud_composite_score(pr_auc, roc_auc, f1)
+    metrics["fraud_composite_score"] = composite
+
+    # Fraud-specific KPIs (defaults match fraud_kpis() signature)
+    _top_k_frac = 0.01
+    _fpr_target = 0.05
+    _prec_target = 0.50
+    kpis = fraud_kpis(y_true, y_prob,
+                      top_k_frac=_top_k_frac,
+                      fpr_target=_fpr_target,
+                      precision_target=_prec_target)
+    metrics.update(kpis)
 
     print("\n" + "=" * 62)
     print(" FINAL TEST METRICS REPORT")
     print("=" * 62)
-    print(f" accuracy     : {accuracy:.4f}")
+    print(f" accuracy     : {metrics.get('accuracy', 0.0):.4f}")
     print(f" precision    : {metrics.get('precision', 0.0):.4f}")
     print(f" recall       : {metrics.get('recall', 0.0):.4f}")
     print(f" f1           : {f1:.4f}")
     print(f" roc_auc      : {roc_auc:.4f}")
-    print(f" pr_auc       : {metrics.get('pr_auc', 0.0):.4f}")
+    print(f" pr_auc       : {pr_auc:.4f}")
     print(f" fpr          : {metrics.get('fpr', 0.0):.4f}")
     print(f" threshold    : {metrics.get('threshold', threshold):.4f}")
     print(" confusion_matrix:")
@@ -238,7 +268,12 @@ def run_test_eval(model, graph, sequences, test_df, card_enc, config):
     print(f"   Actual 0    {metrics.get('tn', 0):7d}   {metrics.get('fp', 0):7d}")
     print(f"   Actual 1    {metrics.get('fn', 0):7d}   {metrics.get('tp', 0):7d}")
     print("-" * 62)
-    print(f" composite    : {composite:.4f}  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)")
+    print(" Fraud-Focused KPIs:")
+    print(f"   precision@{int(_top_k_frac*100)}%   : {kpis.get('precision_at_k', 0.0):.4f}")
+    print(f"   recall@FPR{int(_fpr_target*100)}%  : {kpis.get(f'recall_at_fpr{int(_fpr_target*100)}pct', 0.0):.4f}")
+    print(f"   recall@P{int(_prec_target*100)}%   : {kpis.get(f'recall_at_precision{int(_prec_target*100)}pct', 0.0):.4f}")
+    print("-" * 62)
+    print(f" fraud_composite: {composite:.4f}  (0.5\u00d7PR-AUC + 0.3\u00d7ROC-AUC + 0.2\u00d7F1)")
     print("=" * 62)
     return metrics
 

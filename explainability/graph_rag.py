@@ -4,6 +4,9 @@ Retrieves contextually similar fraud subgraphs and generates
 natural language explanations for analyst review.
 """
 
+import logging
+import warnings
+
 import torch
 import numpy as np
 import pandas as pd
@@ -11,6 +14,8 @@ from typing import List, Dict, Optional
 import json
 import pickle
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class FraudExplainer:
@@ -67,8 +72,22 @@ class FraudExplainer:
         labels: torch.Tensor,      # (N,) binary labels
     ):
         """Populate memory with labeled embeddings for retrieval."""
-        emb_np = embeddings.cpu().numpy()
+        emb_np = embeddings.detach().cpu().numpy().astype(np.float32)
         labels_np = labels.cpu().numpy()
+
+        # ── Embedding health check (warn once) ──────────────────────────────
+        n_nan = int(np.isnan(emb_np).any(axis=1).sum())
+        n_inf = int(np.isinf(emb_np).any(axis=1).sum())
+        norms = np.linalg.norm(emb_np, axis=1)
+        n_zero = int((norms < 1e-6).sum())
+        if n_nan or n_inf or n_zero:
+            logger.warning(
+                "[Explainer] Embedding health: %d NaN, %d inf, %d near-zero vectors "
+                "out of %d — these will be sanitized before storage.",
+                n_nan, n_inf, n_zero, len(emb_np),
+            )
+        # Sanitize: replace non-finite values with 0 before storing
+        emb_np = np.nan_to_num(emb_np, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
         for i, (emb, meta, label) in enumerate(zip(emb_np, metadata, labels_np)):
             if label == 1:
@@ -88,10 +107,34 @@ class FraudExplainer:
               f"{len(self.normal_embeddings)} normal")
 
     def _cosine_similarity(self, query: np.ndarray, memory: np.ndarray) -> np.ndarray:
-        """Batch cosine similarity: query (D,) vs memory (N, D)."""
-        query_norm = query / (np.linalg.norm(query) + 1e-8)
-        mem_norm = memory / (np.linalg.norm(memory, axis=1, keepdims=True) + 1e-8)
-        return mem_norm @ query_norm  # (N,)
+        """Batch cosine similarity: query (D,) vs memory (N, D).
+
+        Numerically safe:
+        - Casts inputs to float64 for norm computation to prevent overflow
+          with very large magnitude values.
+        - Replaces any NaN/inf values with 0 before normalisation.
+        - Returns 0 similarity for zero-norm query or zero-norm memory rows
+          (instead of producing NaN/inf from division or matmul).
+        - Clamps output to [-1, 1].
+        """
+        # Cast to float64 and sanitize non-finite values
+        q = np.nan_to_num(np.asarray(query, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+        m = np.nan_to_num(np.asarray(memory, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Normalize query; return all-zero similarities for zero-norm query
+        q_norm_val = float(np.linalg.norm(q))
+        if q_norm_val < 1e-9:
+            return np.zeros(m.shape[0], dtype=np.float32)
+        q_unit = q / q_norm_val
+
+        # Normalize memory rows; set zero-norm rows to zero vector
+        m_norms = np.linalg.norm(m, axis=1, keepdims=True)  # (N, 1)
+        valid = (m_norms.ravel() >= 1e-9)
+        m_unit = np.where(valid[:, None], m / np.maximum(m_norms, 1e-9), 0.0)
+
+        # Dot product — clamp to handle any residual floating point drift
+        sims = m_unit @ q_unit  # (N,)
+        return np.clip(sims, -1.0, 1.0).astype(np.float32)
 
     def retrieve_similar_fraud(
         self,
