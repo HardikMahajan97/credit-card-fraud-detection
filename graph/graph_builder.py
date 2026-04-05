@@ -191,12 +191,12 @@ def build_temporal_sequences(transactions_df, seq_len=10):
             feats.append(current_feat)
             txn_seq = feats[-seq_len:]
             if len(txn_seq) < seq_len:
-                txn_seq = [[0.0] * 10] * (seq_len - len(txn_seq)) + txn_seq
+                txn_seq = [[0.0] * 10 for _ in range(seq_len - len(txn_seq))] + txn_seq
             per_txn_sequences[row["transaction_id"]] = txn_seq
             seen_merchants.add(merchant_id)
             history_times.append(ts)
         if len(feats) < seq_len:
-            feats = [[0.0] * 10] * (seq_len - len(feats)) + feats
+            feats = [[0.0] * 10 for _ in range(seq_len - len(feats))] + feats
         sequences[card_id] = feats[-seq_len:]
 
     print(f"[GraphBuilder] Sequences built for {len(sequences)} cards")

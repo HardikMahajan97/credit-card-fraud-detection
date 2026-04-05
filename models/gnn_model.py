@@ -21,6 +21,7 @@ def _mean_aggregate(x: torch.Tensor, edge_index: torch.Tensor, max_neighbors: in
 
     src, dst = edge_index[0], edge_index[1]
 
+    # Heuristic guard: only run sampling path when graph is dense globally; per-node capping is still applied below.
     if edge_index.size(1) > max_neighbors * x.size(0):
         perm = torch.randperm(edge_index.size(1), device=x.device)
         src = src[perm]

@@ -35,7 +35,7 @@ CONFIG = {
     "hidden_dim": 256,
     "dropout": 0.3,
     "use_anomaly_heads": True,
-    "epochs": 60,  # complex multi-modal model needs more iterations on imbalanced data
+    "epochs": 60,  # increased from 20 to give added velocity features and multimodal fusion enough convergence room
     "batch_size": 256,
     "lr": 5e-4,  # slightly lower LR; 1e-3 was causing unstable gradients at epoch 1
     "weight_decay": 5e-4,
@@ -192,6 +192,7 @@ def populate_rag(model, graph, sequences, txn_df, card_enc, explainer, config):
             seen_merchants.add(merchant_id)
 
     known = set(card_enc.classes_)
+    default_velocity = (0.0, np.log1p(604800.0), 0.0, 0.0)
     sample = txn_df[txn_df["card_id"].isin(known)].sample(
         min(config.get("rag_sample_size", 3000), len(txn_df)),
         random_state=42,
@@ -208,10 +209,10 @@ def populate_rag(model, graph, sequences, txn_df, card_enc, explainer, config):
             ts = pd.to_datetime(batch["timestamp"])
             amount_vals = batch["amount"].values.astype(float)
             txn_ids = batch["transaction_id"].tolist()
-            amount_delta = np.array([velocity_map.get(txn_id, (0.0, np.log1p(604800.0), 0.0, 0.0))[0] for txn_id in txn_ids], dtype=float)
-            secs_feat = np.array([velocity_map.get(txn_id, (0.0, np.log1p(604800.0), 0.0, 0.0))[1] for txn_id in txn_ids], dtype=float)
-            is_new_merchant = np.array([velocity_map.get(txn_id, (0.0, np.log1p(604800.0), 0.0, 0.0))[2] for txn_id in txn_ids], dtype=float)
-            burst_count_norm = np.array([velocity_map.get(txn_id, (0.0, np.log1p(604800.0), 0.0, 0.0))[3] for txn_id in txn_ids], dtype=float)
+            amount_delta = np.array([velocity_map.get(txn_id, default_velocity)[0] for txn_id in txn_ids], dtype=float)
+            secs_feat = np.array([velocity_map.get(txn_id, default_velocity)[1] for txn_id in txn_ids], dtype=float)
+            is_new_merchant = np.array([velocity_map.get(txn_id, default_velocity)[2] for txn_id in txn_ids], dtype=float)
+            burst_count_norm = np.array([velocity_map.get(txn_id, default_velocity)[3] for txn_id in txn_ids], dtype=float)
             raw = torch.tensor(
                 np.stack(
                     [

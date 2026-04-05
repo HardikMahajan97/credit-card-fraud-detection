@@ -64,10 +64,10 @@ class TransactionDataset(Dataset):
                 np.cos(2 * np.pi * ts.hour / 24),
                 np.sin(2 * np.pi * ts.dayofweek / 7),
                 np.cos(2 * np.pi * ts.dayofweek / 7),
-                0.0,
-                np.log1p(604800.0),
-                0.0,
-                0.0,
+                0.0,  # amount_delta fallback: no per-transaction history available
+                np.log1p(604800.0),  # seconds_since_last fallback: clipped 7-day prior gap
+                0.0,  # is_new_merchant fallback: unknown without per-card merchant history
+                0.0,  # burst_count_norm fallback: no rolling burst window state
             ], dtype=torch.float32)
 
         label = torch.tensor(float(row["is_fraud"]), dtype=torch.float32)

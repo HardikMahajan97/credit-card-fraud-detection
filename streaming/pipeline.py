@@ -150,7 +150,7 @@ class StreamingFraudPipeline:
             np.cos(2*np.pi*ts.dayofweek/7),
             amount_delta,
             secs_feat,
-            0.0,
+            0.0,  # is_new_merchant placeholder: not trackable without persistent merchant-history state
             burst,
         ], dtype=np.float32)
 
