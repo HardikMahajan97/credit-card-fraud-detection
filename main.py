@@ -565,20 +565,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    txn_sorted = txn_df.sort_values(["card_id", "timestamp"]).copy()
-    txn_sorted["timestamp"] = pd.to_datetime(txn_sorted["timestamp"])
-    txn_sorted["avg_amount_5"] = (
-        txn_sorted.groupby("card_id")["amount"]
-        .transform(lambda s: s.shift(1).rolling(5, min_periods=1).mean())
-    )
-    txn_sorted["prev_timestamp"] = txn_sorted.groupby("card_id")["timestamp"].shift(1)
-    txn_sorted["secs_since_last"] = (
-        (txn_sorted["timestamp"] - txn_sorted["prev_timestamp"]).dt.total_seconds().clip(upper=604800)
-    )
-    txn_sorted["secs_since_last"] = txn_sorted["secs_since_last"].fillna(604800.0)
-    txn_sorted["merchant_seen_before"] = txn_sorted.groupby("card_id")["merchant_id"].cumcount() > 0
-    txn_sorted["is_new_merchant"] = (~txn_sorted["merchant_seen_before"]).astype(float)
-    txn_sorted["burst_count_norm"] = txn_sorted.groupby("card_id")["timestamp"].transform(
-        lambda s: [min(sum((t - s).dt.total_seconds().abs() <= 1800) / 10.0, 1.0) for t in s]
-    )
-    txn_features = txn_sorted.set_index("transaction_id")
