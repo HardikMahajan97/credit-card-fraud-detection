@@ -82,6 +82,17 @@ class StreamingFraudPipeline:
         logger.info(f"StreamingFraudPipeline ready (threshold={self.threshold:.3f}, calibrated={self.calibration is not None})")
 
     def update_graph(self, txn):
+        """Append edges for a new transaction to the live graph.
+
+        Out-of-vocabulary (OOV) handling:
+          - card_id not seen at training time  → falls back to index 0 (first trained card).
+          - merchant_id not in merchant_map    → falls back to index 0.
+          - device_id   not in device_map      → falls back to index 0.
+        This is safe for edge bookkeeping but the model will use the node-0
+        embedding as a proxy for the unknown entity.  For production use,
+        reserve a dedicated "unknown" node (index 0) during training so the
+        model learns a meaningful fallback representation.
+        """
         if not hasattr(self, "_ei_dict"):
             self._ei_dict = {}
         card_id = txn.get("card_id")
@@ -90,11 +101,13 @@ class StreamingFraudPipeline:
         if card_id is None or merchant_id is None or device_id is None:
             return
 
+        # OOV: unknown card silently maps to index 0 (see docstring above).
         try:
             c_idx = int(self.card_encoder.transform([card_id])[0])
         except Exception:
             c_idx = 0
 
+        # OOV: unknown merchant/device silently maps to index 0.
         m_idx = int(self.merchant_map.get(merchant_id, 0))
         d_idx = int(self.device_map.get(device_id, 0))
 
@@ -132,6 +145,8 @@ class StreamingFraudPipeline:
         return float(1.0 / (1.0 + np.exp(-(a * logit + b))))
 
     def _card_idx(self, card_id):
+        # OOV: card_id not seen at training time falls back to index 0.
+        # See update_graph() docstring for the long-term mitigation strategy.
         try:
             return int(self.card_encoder.transform([card_id])[0])
         except Exception:

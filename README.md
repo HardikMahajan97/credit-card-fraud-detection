@@ -294,6 +294,49 @@ All key hyperparameters live in `main.py` at the top in the `CONFIG` dict:
 
 ---
 
+## Evaluation Metrics Report (stdout)
+
+After training completes, the pipeline prints a full metrics report to stdout:
+
+```
+==============================================================
+ FINAL TEST METRICS REPORT
+==============================================================
+ accuracy     : 0.9870
+ precision    : 0.8432
+ recall       : 0.7218
+ f1           : 0.7778
+ roc_auc      : 0.9541
+ pr_auc       : 0.8102
+ fpr          : 0.0041
+ threshold    : 0.3820
+ confusion_matrix:
+              Pred 0    Pred 1
+   Actual 0    7412        31
+   Actual 1      53       138
+--------------------------------------------------------------
+ composite    : 0.8479  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)
+==============================================================
+```
+
+The **composite** line is the combined summary mixing Accuracy (20%), F1 (40%) and ROC-AUC (40%).
+
+Per-epoch metrics are also printed during training, including `roc_auc`, `pr_auc`, `f1`, `accuracy`, and the tuned threshold.
+
+---
+
+## Running Tests
+
+```bash
+# With pytest (recommended)
+python -m pytest tests/ -v
+
+# Without pytest
+python tests/test_smoke.py
+```
+
+---
+
 ## Outputs
 
 After training (`python main.py` or `python main.py train`), the `outputs/` folder will contain:
