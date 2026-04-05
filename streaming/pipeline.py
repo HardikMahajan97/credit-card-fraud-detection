@@ -53,7 +53,8 @@ class RollingFeatureStore:
 
 class StreamingFraudPipeline:
     def __init__(self, model, graph, explainer, card_encoder,
-                 seq_len=10, threshold=0.5, device=None, checkpoint_dir: Optional[str] = None):
+                 seq_len=10, threshold=0.5, device=None, checkpoint_dir: Optional[str] = None,
+                 merchant_map: Optional[dict] = None, device_map: Optional[dict] = None):
         self.model        = model.eval()
         self.graph        = graph
         self.explainer    = explainer
@@ -66,6 +67,8 @@ class StreamingFraudPipeline:
         self.total_scored = 0
         self.total_flagged= 0
         self.latencies    = deque(maxlen=1000)
+        self.merchant_map = merchant_map or {}
+        self.device_map = device_map or {}
 
         # Load tuned threshold + calibration if present
         self.threshold = float(threshold)
@@ -77,6 +80,49 @@ class StreamingFraudPipeline:
                 self.threshold = float(j.get("threshold", self.threshold))
                 self.calibration = j.get("calibration")
         logger.info(f"StreamingFraudPipeline ready (threshold={self.threshold:.3f}, calibrated={self.calibration is not None})")
+
+    def update_graph(self, txn):
+        """Append edges for a new transaction to the live graph.
+
+        Out-of-vocabulary (OOV) handling:
+          - card_id not seen at training time  → falls back to index 0 (first trained card).
+          - merchant_id not in merchant_map    → falls back to index 0.
+          - device_id   not in device_map      → falls back to index 0.
+        This is safe for edge bookkeeping but the model will use the node-0
+        embedding as a proxy for the unknown entity.  For production use,
+        reserve a dedicated "unknown" node (index 0) during training so the
+        model learns a meaningful fallback representation.
+        """
+        if not hasattr(self, "_ei_dict"):
+            self._ei_dict = {}
+        card_id = txn.get("card_id")
+        merchant_id = txn.get("merchant_id")
+        device_id = txn.get("device_id")
+        if card_id is None or merchant_id is None or device_id is None:
+            return
+
+        # OOV: unknown card silently maps to index 0 (see docstring above).
+        try:
+            c_idx = int(self.card_encoder.transform([card_id])[0])
+        except Exception:
+            c_idx = 0
+
+        # OOV: unknown merchant/device silently maps to index 0.
+        m_idx = int(self.merchant_map.get(merchant_id, 0))
+        d_idx = int(self.device_map.get(device_id, 0))
+
+        def _append_edge(key, src, dst):
+            ei = self.graph.edge_index_dict.get(key)
+            new_col = torch.tensor([[src], [dst]], dtype=torch.long)
+            if ei is None or ei.numel() == 0:
+                self.graph.edge_index_dict[key] = new_col
+            else:
+                self.graph.edge_index_dict[key] = torch.cat([ei, new_col], dim=1)
+            self._ei_dict[key] = self.graph.edge_index_dict[key].to(self.device)
+
+        _append_edge(("card", "pays", "merchant"), c_idx, m_idx)
+        _append_edge(("card", "uses", "device"), c_idx, d_idx)
+        _append_edge(("device", "seen_at", "merchant"), d_idx, m_idx)
 
     def _features(self, txn):
         ts = pd.Timestamp(txn.get("timestamp", datetime.now().isoformat()))
@@ -99,15 +145,19 @@ class StreamingFraudPipeline:
         return float(1.0 / (1.0 + np.exp(-(a * logit + b))))
 
     def _card_idx(self, card_id):
+        # OOV: card_id not seen at training time falls back to index 0.
+        # See update_graph() docstring for the long-term mitigation strategy.
         try:
             return int(self.card_encoder.transform([card_id])[0])
         except Exception:
             return 0
 
     @torch.no_grad()
-    def score_transaction(self, txn):
+    def score_transaction(self, txn, update_graph: bool = False):
         t0      = time.perf_counter()
         card_id = txn.get("card_id", "")
+        if update_graph:
+            self.update_graph(txn)
         feats   = self._features(txn)
         self.feat_store.update(card_id, feats.tolist(), txn.get("timestamp",""))
         burst   = self.feat_store.get_burst_count(card_id)

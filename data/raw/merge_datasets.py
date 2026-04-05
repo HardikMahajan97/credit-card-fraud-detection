@@ -1,79 +1,75 @@
+import argparse
+from pathlib import Path
 import pandas as pd
-import os
-
-# ===============================
-# STEP 1: Load Mockaroo files
-# ===============================
-
-mockaroo_files = [
-    "data/raw/MOCK_DATA (1).csv",
-    "data/raw/MOCK_DATA (2).csv",
-    "data/raw/MOCK_DATA (3).csv",
-    "data/raw/MOCK_DATA (4).csv",
-    "data/raw/MOCK_DATA (5).csv"
-]
-
-mock_dfs = []
-
-for file in mockaroo_files:
-    df = pd.read_csv(file)
-    mock_dfs.append(df)
-
-mockaroo_df = pd.concat(mock_dfs, ignore_index=True)
-
-print("Mockaroo merged shape:", mockaroo_df.shape)
 
 
-# ===============================
-# STEP 2: Fix column names (IMPORTANT)
-# ===============================
+def merge_datasets(mockaroo_files, generated_path, output_path):
+    mockaroo_paths = [Path(p) for p in mockaroo_files]
+    generated_path = Path(generated_path)
+    output_path = Path(output_path)
 
-mockaroo_df.rename(columns={
-    "txn_id": "transaction_id",
-    "merchant_cat": "merchant_category"
-}, inplace=True)
+    missing = [str(p) for p in mockaroo_paths if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing Mockaroo files: {', '.join(missing)}")
+    if not generated_path.exists():
+        raise FileNotFoundError(f"Generated dataset not found: {generated_path}")
 
-# Add missing columns to match generated dataset
-mockaroo_df["customer_id"] = "UNKNOWN"
-mockaroo_df["is_international"] = 0
-mockaroo_df["transaction_status"] = "approved"
-mockaroo_df["fraud_reasons"] = "none"
+    mock_dfs = [pd.read_csv(str(p)) for p in mockaroo_paths]
+    mockaroo_df = pd.concat(mock_dfs, ignore_index=True)
+    mockaroo_df = mockaroo_df.rename(columns={
+        "txn_id": "transaction_id",
+        "merchant_cat": "merchant_category",
+    })
+    mockaroo_df["customer_id"] = "UNKNOWN"
+    mockaroo_df["is_international"] = 0
+    mockaroo_df["transaction_status"] = "approved"
+    mockaroo_df["fraud_reasons"] = "none"
 
+    generated_df = pd.read_csv(str(generated_path))
+    common_cols = list(set(mockaroo_df.columns) & set(generated_df.columns))
+    merged = pd.concat(
+        [generated_df[common_cols], mockaroo_df[common_cols]],
+        ignore_index=True,
+    )
 
-# ===============================
-# STEP 3: Load programmatic dataset
-# ===============================
-
-generated_df = pd.read_csv("data/raw/transactions.csv")
-
-print("Generated dataset shape:", generated_df.shape)
-
-
-# ===============================
-# STEP 4: Align columns (VERY IMPORTANT)
-# ===============================
-
-# Keep only common columns
-common_cols = list(set(mockaroo_df.columns) & set(generated_df.columns))
-
-mockaroo_df = mockaroo_df[common_cols]
-generated_df = generated_df[common_cols]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(output_path, index=False)
+    return merged
 
 
-# ===============================
-# STEP 5: Merge both datasets
-# ===============================
+def parse_args():
+    parser = argparse.ArgumentParser(description="Merge generated and Mockaroo datasets.")
+    parser.add_argument(
+        "--generated",
+        default="data/raw/transactions.csv",
+        help="Path to generated transactions CSV.",
+    )
+    parser.add_argument(
+        "--mockaroo",
+        nargs="+",
+        default=[
+            "data/raw/MOCK_DATA (1).csv",
+            "data/raw/MOCK_DATA (2).csv",
+            "data/raw/MOCK_DATA (3).csv",
+            "data/raw/MOCK_DATA (4).csv",
+            "data/raw/MOCK_DATA (5).csv",
+        ],
+        help="List of Mockaroo CSV files to merge.",
+    )
+    parser.add_argument(
+        "--output",
+        default="data/raw/final_merged_dataset.csv",
+        help="Output merged CSV path.",
+    )
+    return parser.parse_args()
 
-final_df = pd.concat([generated_df, mockaroo_df], ignore_index=True)
 
-print("Final dataset shape:", final_df.shape)
+def main():
+    args = parse_args()
+    merged = merge_datasets(args.mockaroo, args.generated, args.output)
+    print(f"Mockaroo + generated merged shape: {merged.shape}")
+    print(f"✅ Final dataset saved at: {args.output}")
 
 
-# ===============================
-# STEP 6: Save merged dataset
-# ===============================
-
-output_path = "final_merged_dataset.csv"
-final_df.to_csv(output_path, index=False)
-
-print(f"✅ Final dataset saved at: {output_path}")
+if __name__ == "__main__":
+    main()

@@ -123,20 +123,56 @@ pip install -r requirements.txt
 
 ## Running the Pipeline
 
-### Full end-to-end run (generates data, trains, evaluates, streams):
+### Full end-to-end train/eval/stream run:
 
 ```bash
 python main.py
+# or explicitly:
+python main.py train
 ```
 
 This will:
-1. **Generate** 50,000 synthetic transactions (cards, merchants, devices, customers)
-2. **Build** a heterogeneous transaction graph (PyG HeteroData)
-3. **Train** the GNN + Transformer fusion model (~15 epochs)
-4. **Evaluate** on held-out test set (precision, recall, F1, ROC-AUC, PR-AUC)
-5. **Populate** Graph RAG memory with labeled embeddings
-6. **Simulate** 200 real-time transactions through the streaming pipeline
-7. **Save** all results to `outputs/`
+1. **Load or generate** transactions and entity tables
+2. **Build** graph + temporal sequences
+3. **Train** GNN + Transformer fusion model
+4. **Evaluate** on test set and print a formatted metrics report in stdout
+5. **Populate** Graph RAG memory
+6. **Persist** training artifacts for later predict-only usage
+7. **Simulate** streaming (unless disabled)
+8. **Save** outputs to `outputs/`
+
+### Train only (skip streaming simulation):
+```bash
+python main.py train --no-stream
+```
+
+### Predict one transaction without retraining:
+```bash
+python main.py predict \
+  --card-id CARD_00001 \
+  --merchant-id MERCH_0001 \
+  --device-id DEV_0001 \
+  --amount 129.5 \
+  --timestamp "2026-01-01T12:00:00" \
+  --merchant-category grocery \
+  --channel online \
+  --is-international 0
+```
+
+### Predict with graph edge update:
+```bash
+python main.py predict --transaction-file /absolute/path/to/txn.json --update-graph
+```
+
+### Update graph only (no scoring):
+```bash
+python main.py update-graph --transaction-json '{"card_id":"CARD_00001","merchant_id":"MERCH_0001","device_id":"DEV_0001"}'
+```
+
+### Merge generated + Mockaroo datasets:
+```bash
+python main.py merge --output data/raw/final_merged_dataset.csv
+```
 
 Expected runtime:
 - CPU: ~8–15 minutes (depending on machine)
@@ -149,6 +185,11 @@ Expected runtime:
 ### Generate data only:
 ```bash
 python -m data.generate_data
+```
+
+### Merge datasets module directly:
+```bash
+python -m data.raw.merge_datasets --output data/raw/final_merged_dataset.csv
 ```
 
 ### Build graph only:
@@ -253,9 +294,52 @@ All key hyperparameters live in `main.py` at the top in the `CONFIG` dict:
 
 ---
 
+## Evaluation Metrics Report (stdout)
+
+After training completes, the pipeline prints a full metrics report to stdout:
+
+```
+==============================================================
+ FINAL TEST METRICS REPORT
+==============================================================
+ accuracy     : 0.9870
+ precision    : 0.8432
+ recall       : 0.7218
+ f1           : 0.7778
+ roc_auc      : 0.9541
+ pr_auc       : 0.8102
+ fpr          : 0.0041
+ threshold    : 0.3820
+ confusion_matrix:
+              Pred 0    Pred 1
+   Actual 0    7412        31
+   Actual 1      53       138
+--------------------------------------------------------------
+ composite    : 0.8479  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)
+==============================================================
+```
+
+The **composite** line is the combined summary mixing Accuracy (20%), F1 (40%) and ROC-AUC (40%).
+
+Per-epoch metrics are also printed during training, including `roc_auc`, `pr_auc`, `f1`, `accuracy`, and the tuned threshold.
+
+---
+
+## Running Tests
+
+```bash
+# With pytest (recommended)
+python -m pytest tests/ -v
+
+# Without pytest
+python tests/test_smoke.py
+```
+
+---
+
 ## Outputs
 
-After `python main.py`, the `outputs/` folder will contain:
+After training (`python main.py` or `python main.py train`), the `outputs/` folder will contain:
 
 | File | Contents |
 |------|----------|
@@ -269,7 +353,13 @@ The `models/checkpoints/` folder will contain:
 | File | Contents |
 |------|----------|
 | `best_model.pt` | Best model weights (by val F1) |
+| `best_threshold.json` | Tuned threshold + calibration parameters |
 | `training_history.json` | Per-epoch metrics |
+| `graph_builder.pkl` | Encoders + scaler used during training |
+| `graph.pkl` | Serialized graph + merchant/device index maps |
+| `sequences.pkl` | Per-card temporal sequence dictionary |
+| `explainer.pkl` | Persisted Graph-RAG memory |
+| `training_config.json` | Config used for artifact-compatible predict runs |
 
 ---
 
@@ -359,3 +449,238 @@ Transaction Stream
 - Graph construction overhead grows with graph size — use subgraph sampling for production
 - Transformer latency increases with sequence length — keep `seq_len ≤ 20` for <100ms inference
 - Replay buffer uses random sampling — consider importance-weighted sampling for production
+
+
+
+# Technical Flow Summary — Real-Time Credit Card Fraud Detection (GNN + Transformer + Graph-RAG)
+
+## 1) Goal
+Detect potentially fraudulent credit-card transactions in **near real time** by combining:
+- **Relational signals** (who is connected to whom) via a GNN over an entity graph
+- **Behavioral/temporal signals** (how a card behaves over time) via a Transformer over recent transactions
+- **Human-readable explanations** via retrieval of similar historical fraud cases (“Graph-RAG style”)
+
+This project is built using **pure PyTorch** components for portability (no C++ scatter/sparse extensions required).
+
+---
+
+## 2) High-level pipeline (end-to-end)
+
+### Training/Offline
+1. Ingest dataset (synthetic or real)
+2. Build entity graph (cards, merchants, devices, edges)
+3. Build per-card temporal sequences (last N transactions)
+4. Train Fusion Model (GNN + Transformer + raw features)
+5. Tune decision threshold (optimize F1 on validation)
+6. Calibrate probabilities (Platt scaling)
+7. Save artifacts for online inference
+
+### Online/Streaming Inference
+1. Receive a transaction event (card_id, amount, timestamp, etc.)
+2. Update rolling per-card sequence store
+3. Compute raw features + sequence tensor
+4. Run model inference
+5. Apply calibration and threshold
+6. Retrieve similar fraud examples from embedding memory
+7. Generate explanation + return result
+8. Log results for monitoring + delayed ground-truth evaluation
+
+---
+
+## 3) Repository components and why they exist
+
+## 3.1 Data generation / ingestion (`data/generate_data.py`)
+**What it does**
+- Generates synthetic customers/cards/merchants/devices and a transaction table.
+- Writes CSVs under `data/raw/`.
+
+**Why**
+- Fraud datasets are sensitive and hard to share; synthetic data enables testing the full pipeline.
+
+**How it connects**
+- `main.py` calls `generate_synthetic_dataset()` if `data/raw/transactions.csv` does not exist.
+- Output transactions feed both graph construction and temporal sequence construction.
+
+**Real data support**
+- The file contains placeholders to load Kaggle datasets, but real data must be mapped to the expected normalized schema:
+  `transaction_id, card_id, merchant_id, device_id, amount, timestamp, merchant_category, channel, is_international, is_fraud`.
+
+---
+
+## 3.2 Graph builder (`graph/graph_builder.py`)
+**What it does**
+- Fits encoders (`LabelEncoder`) for IDs: `card_id`, `merchant_id`, `device_id`.
+- Builds a lightweight `SimpleGraph`:
+  - Node features:
+    - card: credit_limit, avg_spend, fraud_history
+    - merchant: risk_score, category_encoded, avg_transaction_amount
+    - device: reuse_count, known_fraudulent
+  - Edges:
+    - (card)-[pays]->(merchant)
+    - (card)-[uses]->(device)
+    - (device)-[seen_at]->(merchant)
+
+**Why**
+- Fraud rings and collusion patterns are **graph problems** (shared devices, repeated merchant links, etc.).
+- The graph provides context that single-transaction features miss.
+
+**How it connects**
+- The GNN consumes `graph.x_dict` and `graph.edge_index_dict`.
+- The same encoders must be used in both training and serving so `card_id -> index` stays consistent.
+- The builder is saved to `models/graph_builder.pkl` for reuse.
+
+**Production note**
+- In streaming, the graph is currently treated as mostly static. In production you typically:
+  - rebuild periodically (hourly/daily), or
+  - incrementally update edges in a graph store.
+
+---
+
+## 3.3 Temporal sequences (`build_temporal_sequences` in `graph/graph_builder.py`)
+**What it does**
+- For each card, constructs a fixed-length sequence of the last `seq_len` transactions.
+- Each step contains 6 features:
+  - log(amount), is_international, hour_sin, hour_cos, channel_encoded, category_encoded
+
+**Why**
+- Fraud often appears as **behavioral drift**: bursts, amount escalation, channel shifts.
+
+**How it connects**
+- The Transformer consumes these sequences during training.
+- In streaming, a rolling feature store maintains this window online.
+
+---
+
+## 3.4 GNN (`models/gnn_model.py`)
+**What it does**
+- Projects typed node features into a common hidden space.
+- Builds a homogeneous edge list from typed edges and applies mean neighbor aggregation for multiple layers.
+
+**Why this approach**
+- Pure PyTorch implementation avoids platform issues with scatter/sparse extensions.
+- Neighbor aggregation captures relational exposure risk:
+  - “This card connects to a high-risk merchant”
+  - “This device is shared across many cards”
+
+**How it connects**
+- Produces embeddings for each node type.
+- The fusion model selects the card embedding by index (`card_indices`).
+
+---
+
+## 3.5 Transformer (`models/transformer_model.py`)
+**What it does**
+- Encodes per-card sequences using `nn.TransformerEncoder` with positional encoding.
+- Pools outputs into a fixed-size `temporal_emb`.
+- Optional anomaly heads produce interpretable sub-scores:
+  - burst_score, amount_anomaly, channel_shift
+
+**Why**
+- Self-attention can learn non-local dependencies in sequences (e.g., changes across last N transactions).
+
+**How it connects**
+- Fusion model concatenates `temporal_emb` with GNN embedding and raw current transaction features.
+
+---
+
+## 3.6 Fusion model (`models/fusion_model.py`)
+**What it does**
+- Runs:
+  1) GNN for relational embedding
+  2) Transformer for temporal embedding
+  3) MLP fusion + classifier for fraud probability
+- Returns:
+  - `fraud_prob`
+  - embeddings (`gnn_emb`, `temporal_emb`, `fused_emb`)
+  - anomaly scores (optional)
+
+**Why**
+- Fraud signals are multi-modal. Fusion allows the model to use:
+  - graph context + temporal behavior + current transaction signals together.
+
+---
+
+## 3.7 Training loop (`training/trainer.py`)
+**What it does**
+- Creates a `TransactionDataset` yielding:
+  `card_idx, sequence, raw_features, seq_mask, label`
+- Trains using:
+  - weighted sampling for class imbalance
+  - focal loss to focus on hard/minority examples
+- Selects a threshold that maximizes validation F1.
+- Fits Platt calibration for better probability quality.
+
+**Artifacts saved**
+- `models/checkpoints/best_model.pt`
+- `models/checkpoints/best_threshold.json` (threshold + calibration parameters)
+- `models/checkpoints/training_history.json`
+
+**Why**
+- Class imbalance is severe in fraud; weighted sampling + focal loss helps.
+- Threshold tuning and calibration are required because “0.5” is rarely optimal.
+
+---
+
+## 3.8 Streaming inference (`streaming/pipeline.py`)
+**What it does**
+- Maintains a `RollingFeatureStore` for per-card sequences (deque).
+- For each incoming transaction:
+  1) compute raw features
+  2) update rolling sequence
+  3) run the model
+  4) apply calibration (if present) and compare against threshold
+  5) generate explanation
+  6) track latency stats
+
+**Why**
+- Real-time fraud scoring requires low-latency feature computation and stable model invocation.
+
+**Key production considerations**
+- The rolling sequence store is in-memory; for multi-replica deployments use Redis or another state store.
+- The ID encoders must match training; unknown IDs need a defined strategy (unknown bucket or dynamic expansion).
+
+---
+
+## 3.9 Explainability (“Graph-RAG style”) (`explainability/graph_rag.py`)
+**What it does**
+- Stores embeddings and metadata for historical examples.
+- Retrieves similar fraud cases by cosine similarity to the current `fused_emb`.
+- Generates a rule-based explanation (placeholder for an LLM call).
+
+**Why**
+- Analysts and stakeholders need “why” explanations, not only a probability score.
+- Retrieval grounds the explanation in known patterns.
+
+**How it connects**
+- `main.py` populates the explainer memory from a sample of training data embeddings.
+- Streaming pipeline calls `explainer.explain()` per event.
+
+---
+
+## 4) How to test with real-time data (recommended approach)
+1. Start with **historical replay**:
+   - read a time-sorted CSV and emit events at a controlled rate
+2. Ensure strict schema validation for each event
+3. Log every scored transaction to storage for delayed evaluation
+4. Handle delayed labels (chargebacks) via an offline join job
+
+---
+
+## 5) How to make it live (minimal production blueprint)
+### Components
+- Batch trainer job (daily/weekly) → produces model + threshold + encoders/graph artifacts
+- Online inference service (FastAPI/gRPC) → loads artifacts and scores events
+- Optional: Kafka consumer → reads transactions topic and writes alerts topic
+
+### Scaling requirements
+- External rolling-sequence state store (Redis) if horizontally scaled
+- Periodic graph rebuild or incremental edge updates
+- Monitoring: latency p95/p99, drift, alert rate, precision/recall after labels arrive
+
+---
+
+## 6) Known gaps for production hardening
+- Unknown card/merchant/device handling strategy
+- Graph update strategy in streaming
+- API server + Dockerization + deployment manifests
+- Security/compliance (PII tokenization, encryption, access controls) if used with real payment data
