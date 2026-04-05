@@ -14,12 +14,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _mean_aggregate(x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-    """Mean neighbor aggregation using only torch.index_add_ (no torch-scatter)."""
+def _mean_aggregate(x: torch.Tensor, edge_index: torch.Tensor, max_neighbors: int = 30) -> torch.Tensor:
+    """Mean neighbor aggregation with per-node neighbor cap (no torch-scatter required)."""
     if edge_index.numel() == 0:
         return torch.zeros_like(x)
 
     src, dst = edge_index[0], edge_index[1]
+
+    if edge_index.size(1) > max_neighbors * x.size(0):
+        perm = torch.randperm(edge_index.size(1), device=x.device)
+        src = src[perm]
+        dst = dst[perm]
+        order = torch.argsort(dst, stable=True)
+        src = src[order]
+        dst = dst[order]
+        _, counts = torch.unique_consecutive(dst, return_counts=True)
+        mask = torch.cat([torch.arange(c, device=x.device) < max_neighbors for c in counts])
+        src = src[mask]
+        dst = dst[mask]
+
     out = torch.zeros_like(x)
     out.index_add_(0, dst, x[src])
 
@@ -41,11 +54,13 @@ class FraudGNN(nn.Module):
         out_dim: int = 32,
         num_layers: int = 2,
         dropout: float = 0.3,
+        max_neighbors: int = 30,
     ):
         super().__init__()
         self.out_dim = out_dim
         self.dropout = dropout
         self.num_layers = num_layers
+        self.max_neighbors = max_neighbors
 
         self.card_proj     = nn.Linear(card_in_dim,     hidden_dim)
         self.merchant_proj = nn.Linear(merchant_in_dim, hidden_dim)
@@ -102,7 +117,7 @@ class FraudGNN(nn.Module):
         edge_index = torch.cat(edges, dim=1) if edges else torch.zeros(2, 0, dtype=torch.long, device=x.device)
 
         for mlp, norm in zip(self.update_mlps, self.norms):
-            neigh = _mean_aggregate(x, edge_index)
+            neigh = _mean_aggregate(x, edge_index, max_neighbors=self.max_neighbors)
             x = mlp(torch.cat([x, neigh], dim=-1))
             x = norm(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
@@ -114,9 +129,9 @@ class FraudGNN(nn.Module):
         }
 
 
-def build_gnn(variant="graphsage", **kwargs):
+def build_gnn(variant="graphsage", max_neighbors=30, **kwargs):
     """Factory. Variant kept for compatibility."""
-    return FraudGNN(**kwargs)
+    return FraudGNN(max_neighbors=max_neighbors, **kwargs)
 
 
 if __name__ == "__main__":

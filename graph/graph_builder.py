@@ -153,23 +153,50 @@ def build_temporal_sequences(transactions_df, seq_len=10):
     per_txn_sequences = {}
     for card_id, group in txn.groupby("card_id"):
         feats = []
+        seen_merchants = set()
+        history_times = []
         for _, row in group.iterrows():
             ts = row["timestamp"]
+            amount = float(row["amount"])
+            recent_amounts = [f[0] for f in feats[-5:]]  # index 0 = log1p(amount)
+            if recent_amounts:
+                rolling_mean = float(np.mean([np.expm1(a) for a in recent_amounts]))
+            else:
+                rolling_mean = amount
+            amount_delta = np.log1p(abs(amount - rolling_mean))
+
+            if history_times:
+                secs = min((ts - history_times[-1]).total_seconds(), 604800)
+            else:
+                secs = 604800
+            secs_feat = np.log1p(secs)
+
+            merchant_id = row.get("merchant_id")
+            is_new_merchant = 1.0 if merchant_id not in seen_merchants else 0.0
+            burst_count = sum((ts - t).total_seconds() <= 1800 for t in history_times)
+            burst_count_norm = min(burst_count / 10.0, 1.0)
+
             current_feat = [
-                np.log1p(row["amount"]),
+                np.log1p(amount),
                 float(row["is_international"]),
                 np.sin(2 * np.pi * ts.hour / 24),
                 np.cos(2 * np.pi * ts.hour / 24),
                 float(chan_enc.transform([row["channel"]])[0]) / max(len(chan_enc.classes_)-1,1),
                 float(cat_enc.transform([row["merchant_category"]])[0]) / max(len(cat_enc.classes_)-1,1),
+                amount_delta,
+                secs_feat,
+                is_new_merchant,
+                burst_count_norm,
             ]
             feats.append(current_feat)
             txn_seq = feats[-seq_len:]
             if len(txn_seq) < seq_len:
-                txn_seq = [[0.0] * 6] * (seq_len - len(txn_seq)) + txn_seq
+                txn_seq = [[0.0] * 10] * (seq_len - len(txn_seq)) + txn_seq
             per_txn_sequences[row["transaction_id"]] = txn_seq
+            seen_merchants.add(merchant_id)
+            history_times.append(ts)
         if len(feats) < seq_len:
-            feats = [[0.0] * 6] * (seq_len - len(feats)) + feats
+            feats = [[0.0] * 10] * (seq_len - len(feats)) + feats
         sequences[card_id] = feats[-seq_len:]
 
     print(f"[GraphBuilder] Sequences built for {len(sequences)} cards")

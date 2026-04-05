@@ -33,7 +33,7 @@ class RollingFeatureStore:
         self.timestamps[card_id].append(ts)
 
     def get_sequence(self, card_id):
-        feat_dim = 6
+        feat_dim = 10
         if card_id not in self.sequences:
             return np.zeros((self.seq_len, feat_dim), dtype=np.float32)
         seq = list(self.sequences[card_id])
@@ -126,13 +126,32 @@ class StreamingFraudPipeline:
 
     def _features(self, txn):
         ts = pd.Timestamp(txn.get("timestamp", datetime.now().isoformat()))
+        card_id = txn.get("card_id", "")
+        amount = float(txn.get("amount", 0))
+
+        recent_amts = [s[0] for s in list(self.feat_store.sequences.get(card_id, []))]
+        rolling_mean = float(np.mean([np.expm1(a) for a in recent_amts[-5:]])) if recent_amts else amount
+        amount_delta = np.log1p(abs(amount - rolling_mean))
+
+        prev_ts_list = list(self.feat_store.timestamps.get(card_id, []))
+        if prev_ts_list:
+            secs = min((ts - prev_ts_list[-1]).total_seconds(), 604800)
+        else:
+            secs = 604800
+        secs_feat = np.log1p(secs)
+
+        burst = min(self.feat_store.get_burst_count(card_id) / 10.0, 1.0)
         return np.array([
-            np.log1p(float(txn.get("amount", 0))),
+            np.log1p(amount),
             float(txn.get("is_international", 0)),
             np.sin(2*np.pi*ts.hour/24),
             np.cos(2*np.pi*ts.hour/24),
             np.sin(2*np.pi*ts.dayofweek/7),
             np.cos(2*np.pi*ts.dayofweek/7),
+            amount_delta,
+            secs_feat,
+            0.0,
+            burst,
         ], dtype=np.float32)
 
     def _apply_calibration(self, prob_val: float) -> float:

@@ -28,12 +28,13 @@ def build_seq_mask(sequences: torch.Tensor) -> torch.Tensor:
 
 
 class TransactionDataset(Dataset):
-    def __init__(self, transactions_df, sequences, card_encoder, seq_len=10):
+    def __init__(self, transactions_df, sequences, card_encoder, seq_len=10, per_txn_sequences=None):
         self.seq_len = seq_len
         known = set(card_encoder.classes_)
         df = transactions_df[transactions_df["card_id"].isin(known)].reset_index(drop=True)
         self.df           = df
         self.sequences    = sequences
+        self.per_txn_sequences = per_txn_sequences or {}
         self.card_indices = card_encoder.transform(df["card_id"])
 
     def __len__(self):
@@ -44,20 +45,30 @@ class TransactionDataset(Dataset):
         card_idx = int(self.card_indices[idx])
         card_id  = row["card_id"]
 
-        seq = self.sequences.get(card_id, np.zeros((self.seq_len, 6), dtype=np.float32))
+        txn_id = row.get("transaction_id")
+        seq = self.per_txn_sequences.get(txn_id)
+        if seq is None:
+            seq = self.sequences.get(card_id, np.zeros((self.seq_len, 10), dtype=np.float32))
         seq = np.array(seq, dtype=np.float32)
         seq = torch.tensor(seq, dtype=torch.float32)
         seq_mask = build_seq_mask(seq.unsqueeze(0)).squeeze(0)
 
-        ts = pd.Timestamp(row["timestamp"])
-        raw = torch.tensor([
-            np.log1p(float(row["amount"])),
-            float(row["is_international"]),
-            np.sin(2 * np.pi * ts.hour / 24),
-            np.cos(2 * np.pi * ts.hour / 24),
-            np.sin(2 * np.pi * ts.dayofweek / 7),
-            np.cos(2 * np.pi * ts.dayofweek / 7),
-        ], dtype=torch.float32)
+        if txn_id in self.per_txn_sequences:
+            raw = torch.tensor(seq[-1], dtype=torch.float32)
+        else:
+            ts = pd.Timestamp(row["timestamp"])
+            raw = torch.tensor([
+                np.log1p(float(row["amount"])),
+                float(row["is_international"]),
+                np.sin(2 * np.pi * ts.hour / 24),
+                np.cos(2 * np.pi * ts.hour / 24),
+                np.sin(2 * np.pi * ts.dayofweek / 7),
+                np.cos(2 * np.pi * ts.dayofweek / 7),
+                0.0,
+                np.log1p(604800.0),
+                0.0,
+                0.0,
+            ], dtype=torch.float32)
 
         label = torch.tensor(float(row["is_fraud"]), dtype=torch.float32)
         return card_idx, seq, raw, seq_mask, label
