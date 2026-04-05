@@ -25,8 +25,8 @@ from streaming.pipeline import StreamingFraudPipeline, simulate_streaming
 from training.trainer import PlattCalibrator, TransactionDataset, evaluate, train, fraud_kpis, fraud_composite_score
 
 CONFIG = {
-    "n_transactions": 50000,
-    "seq_len": 10,
+    "n_transactions": 200000,
+    "seq_len": 15,
     "test_size": 0.15,
     "val_size": 0.15,
     "gnn_variant": "graphsage",
@@ -50,7 +50,7 @@ CONFIG = {
     "use_calibration": True,
     "threshold_objective": "f1",
     "threshold": 0.5,
-    "stream_n_transactions": 200,
+    "stream_n_transactions": 10,
     "stream_delay_ms": 5,
     "rag_sample_size": 3000,
     "data_dir": "data/raw",

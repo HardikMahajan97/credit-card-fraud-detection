@@ -212,19 +212,19 @@ def generate_synthetic_dataset(output_dir="data/raw"):
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     print("[DataGen] Generating customers...")
-    customers = generate_customers(500)
+    customers = generate_customers(5000)
 
     print("[DataGen] Generating cards...")
     cards = generate_cards(customers)
 
     print("[DataGen] Generating merchants...")
-    merchants = generate_merchants(200)
+    merchants = generate_merchants(2000)
 
     print("[DataGen] Generating devices...")
-    devices = generate_devices(800)
+    devices = generate_devices(8000)
 
     print("[DataGen] Generating transactions...")
-    transactions = generate_transactions(cards, merchants, devices, n=50000)
+    transactions = generate_transactions(cards, merchants, devices, n=200000)
 
     customers.to_csv(f"{output_dir}/customers.csv", index=False)
     cards.to_csv(f"{output_dir}/cards.csv", index=False)

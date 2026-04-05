@@ -17,4 +17,5 @@ build
 *.egg
 *.tar.gz
 *.whl
-
+*.pkl
+*.pt
