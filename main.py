@@ -35,17 +35,18 @@ CONFIG = {
     "hidden_dim": 256,
     "dropout": 0.3,
     "use_anomaly_heads": True,
-    "epochs": 20,
+    "epochs": 60,  # increased from 20 to give added velocity features and multimodal fusion enough convergence room
     "batch_size": 256,
-    "lr": 1e-3,
+    "lr": 5e-4,  # slightly lower LR; 1e-3 was causing unstable gradients at epoch 1
     "weight_decay": 5e-4,
-    "patience": 7,
-    "lr_patience": 3,
+    "patience": 15,  # allow model to plateau briefly without stopping
+    "lr_patience": 5,  # give scheduler more room before halving LR
     "scheduler": "reduce_on_plateau",
     "imbalance_mode": "weighted_sampler",
-    "pos_weight": 8.0,
-    "focal_alpha": 0.5,
-    "focal_gamma": 2.5,
+    "pos_weight": 1.0,  # alpha now carries the imbalance penalty; pos_weight redundant
+    "focal_alpha": 0.75,  # 0.75 up-weights fraud (minority) gradient; 0.25 was suppressing it
+    "focal_gamma": 2.0,  # standard gamma; reduce from 2.5 to avoid over-focusing on hard examples
+    "gnn_max_neighbors": 30,  # cap neighbors per node in GNN aggregation; prevents over-smoothing on dense graphs
     "use_calibration": True,
     "threshold_objective": "f1",
     "threshold": 0.5,
@@ -158,7 +159,40 @@ def populate_rag(model, graph, sequences, txn_df, card_enc, explainer, config):
     device = next(model.parameters()).device
     x_dict = {k: v.to(device) for k, v in graph.x_dict.items()}
     ei_dict = {k: v.to(device) for k, v in graph.edge_index_dict.items()}
+
+    txn_tmp = txn_df.copy()
+    txn_tmp["timestamp"] = pd.to_datetime(txn_tmp["timestamp"])
+    txn_tmp = txn_tmp.sort_values(["card_id", "timestamp"]).reset_index(drop=True)
+    velocity_map = {}
+    for card_id, group in txn_tmp.groupby("card_id"):
+        seen_merchants = set()
+        hist_times = []
+        hist_amounts = []
+        for _, row in group.iterrows():
+            txn_id = row.get("transaction_id")
+            ts = row["timestamp"]
+            amt = float(row["amount"])
+            if hist_amounts:
+                rolling_mean = float(np.mean(hist_amounts[-5:]))
+            else:
+                rolling_mean = amt
+            amount_delta = np.log1p(abs(amt - rolling_mean))
+            if hist_times:
+                secs = min((ts - hist_times[-1]).total_seconds(), 604800)
+            else:
+                secs = 604800
+            secs_feat = np.log1p(secs)
+            merchant_id = row.get("merchant_id")
+            is_new_merchant = 1.0 if merchant_id not in seen_merchants else 0.0
+            burst_count = sum((ts - t).total_seconds() <= 1800 for t in hist_times)
+            burst_count_norm = min(burst_count / 10.0, 1.0)
+            velocity_map[txn_id] = (amount_delta, secs_feat, is_new_merchant, burst_count_norm)
+            hist_times.append(ts)
+            hist_amounts.append(amt)
+            seen_merchants.add(merchant_id)
+
     known = set(card_enc.classes_)
+    default_velocity = (0.0, np.log1p(604800.0), 0.0, 0.0)
     sample = txn_df[txn_df["card_id"].isin(known)].sample(
         min(config.get("rag_sample_size", 3000), len(txn_df)),
         random_state=42,
@@ -173,21 +207,31 @@ def populate_rag(model, graph, sequences, txn_df, card_enc, explainer, config):
             batch = sample.iloc[i : i + bs]
             cidx = torch.tensor(card_enc.transform(batch["card_id"]), dtype=torch.long, device=device)
             ts = pd.to_datetime(batch["timestamp"])
+            amount_vals = batch["amount"].values.astype(float)
+            txn_ids = batch["transaction_id"].tolist()
+            amount_delta = np.array([velocity_map.get(txn_id, default_velocity)[0] for txn_id in txn_ids], dtype=float)
+            secs_feat = np.array([velocity_map.get(txn_id, default_velocity)[1] for txn_id in txn_ids], dtype=float)
+            is_new_merchant = np.array([velocity_map.get(txn_id, default_velocity)[2] for txn_id in txn_ids], dtype=float)
+            burst_count_norm = np.array([velocity_map.get(txn_id, default_velocity)[3] for txn_id in txn_ids], dtype=float)
             raw = torch.tensor(
                 np.stack(
                     [
-                        np.log1p(batch["amount"].values),
+                        np.log1p(amount_vals),
                         batch["is_international"].values.astype(float),
                         np.sin(2 * np.pi * ts.dt.hour / 24),
                         np.cos(2 * np.pi * ts.dt.hour / 24),
                         np.sin(2 * np.pi * ts.dt.dayofweek / 7),
                         np.cos(2 * np.pi * ts.dt.dayofweek / 7),
+                        amount_delta,
+                        secs_feat,
+                        is_new_merchant,
+                        burst_count_norm,
                     ],
                     axis=1,
                 ).astype(np.float32),
                 device=device,
             )
-            default_seq = np.zeros((config["seq_len"], 6), dtype=np.float32)
+            default_seq = np.zeros((config["seq_len"], 10), dtype=np.float32)
             batch_seqs = [sequences.get(c, default_seq) for c in batch["card_id"]]
             seqs = torch.tensor(np.stack(batch_seqs, axis=0).astype(np.float32), device=device)
             _, embs, _ = model(x_dict, ei_dict, cidx, seqs, raw)
@@ -222,7 +266,7 @@ def run_test_eval(model, graph, sequences, test_df, card_enc, config):
 
     print("\n[Main] Test evaluation...")
     device = next(model.parameters()).device
-    test_ds = TransactionDataset(test_df, sequences, card_enc, config["seq_len"])
+    test_ds = TransactionDataset(test_df, sequences, card_enc, config["seq_len"], config.get("per_txn_sequences"))
     test_loader = DataLoader(test_ds, batch_size=config["batch_size"], shuffle=False)
 
     threshold = float(config.get("threshold", 0.5))
@@ -298,7 +342,7 @@ def run_train(config, run_stream=True):
     builder.fit(txn_df, cards_df, merchants_df, devices_df)
     graph, txn_clean = builder.build_graph(txn_df, cards_df, merchants_df, devices_df)
     print("[Main] Building sequences...")
-    sequences, _, _ = build_temporal_sequences(txn_df, seq_len=config["seq_len"])
+    sequences, _, _, per_txn_sequences = build_temporal_sequences(txn_df, seq_len=config["seq_len"])
 
     train_df, val_df, test_df = time_split(txn_clean, config)
     print("\n[Main] Building model...")
@@ -306,12 +350,13 @@ def run_train(config, run_stream=True):
     params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[Main] Parameters: {params:,}")
 
-    train_ds = TransactionDataset(train_df, sequences, builder.card_enc, config["seq_len"])
-    val_ds = TransactionDataset(val_df, sequences, builder.card_enc, config["seq_len"])
+    dataset_config = {**config, "per_txn_sequences": per_txn_sequences}
+    train_ds = TransactionDataset(train_df, sequences, builder.card_enc, config["seq_len"], per_txn_sequences)
+    val_ds = TransactionDataset(val_df, sequences, builder.card_enc, config["seq_len"], per_txn_sequences)
     print(f"[Main] Train={len(train_ds)} Val={len(val_ds)}")
     trained_model, _ = train(model, train_ds, val_ds, graph, config, config["checkpoint_dir"])
 
-    test_metrics = run_test_eval(trained_model, graph, sequences, test_df, builder.card_enc, config)
+    test_metrics = run_test_eval(trained_model, graph, sequences, test_df, builder.card_enc, dataset_config)
     explainer = FraudExplainer(embedding_dim=_explainer_embedding_dim(config))
     populate_rag(trained_model, graph, sequences, train_df, builder.card_enc, explainer, config)
     _persist_artifacts(config, builder, graph, sequences, explainer)

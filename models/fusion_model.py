@@ -10,7 +10,7 @@ from typing import Optional
 from models.gnn_model import build_gnn
 from models.transformer_model import TransactionTransformer, TemporalAnomalyHead
 
-RAW_FEAT_DIM = 6
+RAW_FEAT_DIM = 10
 
 
 class FusionFraudDetector(nn.Module):
@@ -27,6 +27,7 @@ class FusionFraudDetector(nn.Module):
         card_in_dim: int = 3,
         merchant_in_dim: int = 3,
         device_in_dim: int = 2,
+        max_neighbors: int = 30,
     ):
         super().__init__()
 
@@ -36,6 +37,7 @@ class FusionFraudDetector(nn.Module):
             merchant_in_dim=merchant_in_dim,
             device_in_dim=device_in_dim,
             out_dim=gnn_out_dim,
+            max_neighbors=max_neighbors,
         )
 
         self.transformer = TransactionTransformer(
@@ -134,6 +136,7 @@ def build_model(config: dict) -> FusionFraudDetector:
         dropout=config.get("dropout", 0.3),
         seq_len=config.get("seq_len", 10),
         use_anomaly_heads=config.get("use_anomaly_heads", True),
+        max_neighbors=config.get("gnn_max_neighbors", 30),
     )
 
 
@@ -147,6 +150,6 @@ if __name__ == "__main__":
         ("card","uses","device"):   torch.stack([torch.randint(0,n_c,(100,)), torch.randint(0,n_d,(100,))]),
     }
     probs, embs, scores = model(x_dict, ei, torch.randint(0,n_c,(B,)),
-                                torch.randn(B,10,6), torch.randn(B,6))
+                                torch.randn(B,10,10), torch.randn(B,10))
     print(f"[FusionModel] fraud_prob: {probs.shape}")
     print("[FusionModel] Smoke test passed.")

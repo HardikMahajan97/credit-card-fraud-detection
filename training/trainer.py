@@ -28,12 +28,13 @@ def build_seq_mask(sequences: torch.Tensor) -> torch.Tensor:
 
 
 class TransactionDataset(Dataset):
-    def __init__(self, transactions_df, sequences, card_encoder, seq_len=10):
+    def __init__(self, transactions_df, sequences, card_encoder, seq_len=10, per_txn_sequences=None):
         self.seq_len = seq_len
         known = set(card_encoder.classes_)
         df = transactions_df[transactions_df["card_id"].isin(known)].reset_index(drop=True)
         self.df           = df
         self.sequences    = sequences
+        self.per_txn_sequences = per_txn_sequences or {}
         self.card_indices = card_encoder.transform(df["card_id"])
 
     def __len__(self):
@@ -44,20 +45,30 @@ class TransactionDataset(Dataset):
         card_idx = int(self.card_indices[idx])
         card_id  = row["card_id"]
 
-        seq = self.sequences.get(card_id, np.zeros((self.seq_len, 6), dtype=np.float32))
+        txn_id = row.get("transaction_id")
+        seq = self.per_txn_sequences.get(txn_id)
+        if seq is None:
+            seq = self.sequences.get(card_id, np.zeros((self.seq_len, 10), dtype=np.float32))
         seq = np.array(seq, dtype=np.float32)
         seq = torch.tensor(seq, dtype=torch.float32)
         seq_mask = build_seq_mask(seq.unsqueeze(0)).squeeze(0)
 
-        ts = pd.Timestamp(row["timestamp"])
-        raw = torch.tensor([
-            np.log1p(float(row["amount"])),
-            float(row["is_international"]),
-            np.sin(2 * np.pi * ts.hour / 24),
-            np.cos(2 * np.pi * ts.hour / 24),
-            np.sin(2 * np.pi * ts.dayofweek / 7),
-            np.cos(2 * np.pi * ts.dayofweek / 7),
-        ], dtype=torch.float32)
+        if txn_id in self.per_txn_sequences:
+            raw = torch.tensor(seq[-1], dtype=torch.float32)
+        else:
+            ts = pd.Timestamp(row["timestamp"])
+            raw = torch.tensor([
+                np.log1p(float(row["amount"])),
+                float(row["is_international"]),
+                np.sin(2 * np.pi * ts.hour / 24),
+                np.cos(2 * np.pi * ts.hour / 24),
+                np.sin(2 * np.pi * ts.dayofweek / 7),
+                np.cos(2 * np.pi * ts.dayofweek / 7),
+                0.0,  # amount_delta fallback: no per-transaction history available
+                np.log1p(604800.0),  # seconds_since_last fallback: clipped 7-day prior gap
+                0.0,  # is_new_merchant fallback: unknown without per-card merchant history
+                0.0,  # burst_count_norm fallback: no rolling burst window state
+            ], dtype=torch.float32)
 
         label = torch.tensor(float(row["is_fraud"]), dtype=torch.float32)
         return card_idx, seq, raw, seq_mask, label
@@ -354,7 +365,7 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
                                   lr=config.get("lr", 1e-3),
                                   weight_decay=config.get("weight_decay", 1e-4))
 
-    # Adaptive scheduler: ReduceLROnPlateau monitors val-F1 and halves LR on
+    # Adaptive scheduler: ReduceLROnPlateau monitors validation PR-AUC and halves LR on
     # plateau, giving the model more room to escape flat regions.  Falls back to
     # CosineAnnealingLR when the config explicitly requests it.
     scheduler_type = config.get("scheduler", "reduce_on_plateau")
@@ -364,7 +375,7 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
     else:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            mode="max",           # maximise val-F1
+            mode="max",           # maximise validation PR-AUC
             factor=0.5,
             patience=config.get("lr_patience", 3),
             min_lr=1e-6,
@@ -373,12 +384,12 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
     # Loss config
     alpha = float(config.get("focal_alpha", 0.25))
     gamma = float(config.get("focal_gamma", 2.0))
-    pos_weight = torch.tensor([float(config.get("pos_weight", 1.0))], dtype=torch.float32, device=device)
+    pos_weight = torch.tensor([float(config.get("pos_weight", 1.0))], dtype=torch.float32, device=device)  # pos_weight=1.0 is intentional when focal_alpha >= 0.75; do not increase both simultaneously
     criterion = FocalLoss(alpha=alpha, gamma=gamma, pos_weight=pos_weight)
 
     early_stopper = EarlyStopping(patience=config.get("patience", 5))
 
-    history, best_state, best_f1 = [], None, 0.0
+    history, best_state, best_pr_auc = [], None, 0.0
     best_threshold = float(config.get("threshold", 0.5))
     calibrator = None
 
@@ -405,7 +416,7 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
         # Step scheduler: ReduceLROnPlateau needs the monitored metric;
         # CosineAnnealingLR takes no argument.
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(val_m2["f1"])
+            scheduler.step(val_m2["pr_auc"])
         else:
             scheduler.step()
 
@@ -419,13 +430,13 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
 
         history.append({"epoch": epoch, "train_loss": train_loss, **val_m2})
 
-        if early_stopper.step(val_m2["f1"]):
-            best_f1    = val_m2["f1"]
+        if early_stopper.step(val_m2["pr_auc"]):
+            best_pr_auc = val_m2["pr_auc"]
             best_state = copy.deepcopy(model.state_dict())
             torch.save(best_state, f"{save_dir}/best_model.pt")
             with open(f"{save_dir}/best_threshold.json", "w") as f:
                 json.dump({"threshold": float(best_threshold), "calibration": (calibrator.state_dict() if calibrator else None)}, f, indent=2)
-            print(f"  ✓ Best F1={best_f1:.4f} — saved")
+            print(f"  ✓ Best PR-AUC={val_m2['pr_auc']:.4f} — saved")
 
         if early_stopper.should_stop:
             print(f"[Trainer] Early stop at epoch {epoch}")
@@ -443,7 +454,7 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
     best_roc     = best_epoch_m.get("roc_auc", 0.0)
     best_pr_auc  = best_epoch_m.get("pr_auc", 0.0)
     composite    = fraud_composite_score(best_pr_auc, best_roc, best_f1_hist)
-    print(f"[Trainer] Done. Best F1={best_f1:.4f}")
+    print(f"[Trainer] Done. Best PR-AUC={best_pr_auc:.4f}")
     print("\n" + "="*60)
     print("  TRAINING FRAUD-COMPOSITE SCORE SUMMARY")
     print("="*60)

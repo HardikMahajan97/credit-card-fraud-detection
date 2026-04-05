@@ -37,7 +37,7 @@ class TransactionTransformer(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 6,
+        input_dim: int = 10,
         d_model: int = 64,
         nhead: int = 4,
         num_layers: int = 3,
@@ -125,7 +125,7 @@ class TemporalAnomalyHead(nn.Module):
 
 
 if __name__ == "__main__":
-    B, seq_len, input_dim = 32, 10, 6
+    B, seq_len, input_dim = 32, 10, 10
     model = TransactionTransformer(input_dim=input_dim)
     x   = torch.randn(B, seq_len, input_dim)
     out = model(x)
