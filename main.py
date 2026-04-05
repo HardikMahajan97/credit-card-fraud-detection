@@ -331,7 +331,7 @@ def run_predict(config, transaction, update_graph=False):
         pipeline,
         sequences,
         transaction.get("card_id", ""),
-        transaction.get("timestamp", pd.Timestamp.utcnow().isoformat()),
+        transaction.get("timestamp", pd.Timestamp.now("UTC").isoformat()),
     )
     result = pipeline.score_transaction(transaction, update_graph=update_graph)
 
@@ -392,7 +392,7 @@ def _parse_transaction_args(args):
             "merchant_id": args.merchant_id.strip(),
             "device_id": args.device_id.strip(),
             "amount": float(args.amount or 0),
-            "timestamp": args.timestamp or pd.Timestamp.utcnow().isoformat(),
+            "timestamp": args.timestamp or pd.Timestamp.now("UTC").isoformat(),
             "merchant_category": args.merchant_category or "unknown",
             "channel": args.channel or "pos",
             "is_international": int(args.is_international or 0),
@@ -470,10 +470,10 @@ def main():
 
     cmd = args.command or "train"
     if cmd == "train":
-        run_train(config, run_stream=not args.no_stream)
+        run_train(config, run_stream=not getattr(args, "no_stream", False))
     elif cmd == "predict":
         txn = _parse_transaction_args(args)
-        run_predict(config, txn, update_graph=args.update_graph)
+        run_predict(config, txn, update_graph=getattr(args, "update_graph", False))
     elif cmd == "update-graph":
         txn = _parse_transaction_args(args)
         run_update_graph(config, txn)
