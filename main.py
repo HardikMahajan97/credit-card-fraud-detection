@@ -35,17 +35,18 @@ CONFIG = {
     "hidden_dim": 256,
     "dropout": 0.3,
     "use_anomaly_heads": True,
-    "epochs": 20,
+    "epochs": 60,  # complex multi-modal model needs more iterations on imbalanced data
     "batch_size": 256,
-    "lr": 1e-3,
+    "lr": 5e-4,  # slightly lower LR; 1e-3 was causing unstable gradients at epoch 1
     "weight_decay": 5e-4,
-    "patience": 7,
-    "lr_patience": 3,
+    "patience": 15,  # allow model to plateau briefly without stopping
+    "lr_patience": 5,  # give scheduler more room before halving LR
     "scheduler": "reduce_on_plateau",
     "imbalance_mode": "weighted_sampler",
-    "pos_weight": 8.0,
-    "focal_alpha": 0.5,
-    "focal_gamma": 2.5,
+    "pos_weight": 1.0,  # alpha now carries the imbalance penalty; pos_weight redundant
+    "focal_alpha": 0.75,  # 0.75 up-weights fraud (minority) gradient; 0.25 was suppressing it
+    "focal_gamma": 2.0,  # standard gamma; reduce from 2.5 to avoid over-focusing on hard examples
+    "gnn_max_neighbors": 30,  # cap neighbors per node in GNN aggregation; prevents over-smoothing on dense graphs
     "use_calibration": True,
     "threshold_objective": "f1",
     "threshold": 0.5,
@@ -298,7 +299,7 @@ def run_train(config, run_stream=True):
     builder.fit(txn_df, cards_df, merchants_df, devices_df)
     graph, txn_clean = builder.build_graph(txn_df, cards_df, merchants_df, devices_df)
     print("[Main] Building sequences...")
-    sequences, _, _ = build_temporal_sequences(txn_df, seq_len=config["seq_len"])
+    sequences, _, _, _ = build_temporal_sequences(txn_df, seq_len=config["seq_len"])
 
     train_df, val_df, test_df = time_split(txn_clean, config)
     print("\n[Main] Building model...")

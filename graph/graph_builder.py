@@ -150,24 +150,30 @@ def build_temporal_sequences(transactions_df, seq_len=10):
     cat_enc  = LabelEncoder().fit(txn["merchant_category"])
 
     sequences = {}
+    per_txn_sequences = {}
     for card_id, group in txn.groupby("card_id"):
         feats = []
         for _, row in group.iterrows():
             ts = row["timestamp"]
-            feats.append([
+            current_feat = [
                 np.log1p(row["amount"]),
                 float(row["is_international"]),
                 np.sin(2 * np.pi * ts.hour / 24),
                 np.cos(2 * np.pi * ts.hour / 24),
                 float(chan_enc.transform([row["channel"]])[0]) / max(len(chan_enc.classes_)-1,1),
                 float(cat_enc.transform([row["merchant_category"]])[0]) / max(len(cat_enc.classes_)-1,1),
-            ])
+            ]
+            feats.append(current_feat)
+            txn_seq = feats[-seq_len:]
+            if len(txn_seq) < seq_len:
+                txn_seq = [[0.0] * 6] * (seq_len - len(txn_seq)) + txn_seq
+            per_txn_sequences[row["transaction_id"]] = txn_seq
         if len(feats) < seq_len:
-            feats = [[0.0]*6] * (seq_len - len(feats)) + feats
+            feats = [[0.0] * 6] * (seq_len - len(feats)) + feats
         sequences[card_id] = feats[-seq_len:]
 
     print(f"[GraphBuilder] Sequences built for {len(sequences)} cards")
-    return sequences, chan_enc, cat_enc
+    return sequences, chan_enc, cat_enc, per_txn_sequences
 
 
 if __name__ == "__main__":
