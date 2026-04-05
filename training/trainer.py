@@ -127,6 +127,94 @@ def compute_metrics(y_true, y_pred_prob, threshold=0.5):
     }
 
 
+def fraud_kpis(y_true: np.ndarray, y_prob: np.ndarray,
+               top_k_frac: float = 0.01,
+               fpr_target: float = 0.05,
+               precision_target: float = 0.5) -> dict:
+    """Compute fraud-specific threshold-based KPIs.
+
+    Args:
+        y_true: Binary ground-truth labels (0/1).
+        y_prob: Predicted fraud probabilities.
+        top_k_frac: Fraction of top-scored transactions to use for precision@k
+                    (default 1%).
+        fpr_target: FPR level at which recall is evaluated (default 5%).
+        precision_target: Precision level at which recall is evaluated
+                          (default 50%).
+
+    Returns:
+        Dict with keys:
+          - ``precision_at_k``: precision among top ``top_k_frac`` scored rows.
+          - ``recall_at_fpr{N}``: recall when FPR ≤ fpr_target (0 if infeasible).
+          - ``recall_at_precision{N}``: recall when precision ≥ precision_target
+            (0 if infeasible).
+          - ``pr_auc``: area under precision-recall curve (for convenience).
+    """
+    y_true = np.asarray(y_true, dtype=int)
+    y_prob = np.asarray(y_prob, dtype=float)
+
+    n_pos = y_true.sum()
+    n = len(y_true)
+
+    results: dict = {}
+
+    # precision@k: top top_k_frac fraction by score
+    k = max(1, int(np.ceil(n * top_k_frac)))
+    top_k_idx = np.argsort(y_prob)[::-1][:k]
+    if k > 0:
+        results["precision_at_k"] = float(y_true[top_k_idx].mean())
+    else:
+        results["precision_at_k"] = 0.0
+
+    # recall@FPR: walk the ROC curve; find first point where FPR ≤ fpr_target
+    if n_pos > 0 and n_pos < n:
+        from sklearn.metrics import roc_curve
+        fprs, tprs, _ = roc_curve(y_true, y_prob)
+        # find the highest TPR (recall) achievable at FPR ≤ fpr_target
+        mask = fprs <= fpr_target
+        results[f"recall_at_fpr{int(fpr_target * 100)}pct"] = (
+            float(tprs[mask].max()) if mask.any() else 0.0
+        )
+    else:
+        results[f"recall_at_fpr{int(fpr_target * 100)}pct"] = 0.0
+
+    # recall@precision: walk the PR curve; find highest recall where precision ≥ target
+    if n_pos > 0:
+        precisions, recalls, _ = precision_recall_curve(y_true, y_prob)
+        mask = precisions >= precision_target
+        results[f"recall_at_precision{int(precision_target * 100)}pct"] = (
+            float(recalls[mask].max()) if mask.any() else 0.0
+        )
+    else:
+        results[f"recall_at_precision{int(precision_target * 100)}pct"] = 0.0
+
+    # PR-AUC (convenience duplicate so callers need only this dict)
+    results["pr_auc"] = (
+        float(average_precision_score(y_true, y_prob)) if n_pos > 0 else 0.0
+    )
+
+    return results
+
+
+def fraud_composite_score(pr_auc: float, roc_auc: float, f1: float) -> float:
+    """Fraud-focused composite score (no accuracy, PR-AUC weighted highest).
+
+    Formula:  0.5 × PR-AUC + 0.3 × ROC-AUC + 0.2 × F1
+
+    Rationale:
+    - PR-AUC is the primary metric for imbalanced fraud data (0.5 weight).
+    - ROC-AUC captures overall ranking quality (0.3 weight).
+    - F1 reflects threshold-specific trade-off (0.2 weight).
+    - Accuracy is excluded: it is dominated by the majority class and
+      misleading on highly imbalanced datasets.
+
+    Safe fallback: any NaN/inf input is treated as 0.
+    """
+    def _safe(v):
+        return float(v) if np.isfinite(v) else 0.0
+    return 0.5 * _safe(pr_auc) + 0.3 * _safe(roc_auc) + 0.2 * _safe(f1)
+
+
 def find_best_threshold(y_true: np.ndarray, y_prob: np.ndarray, objective: str = "f1"):
     """Select threshold from PR curve; default maximizes F1 on validation."""
     precision, recall, thresholds = precision_recall_curve(y_true, y_prob)
@@ -351,17 +439,17 @@ def train(model, train_dataset, val_dataset, graph_data, config, save_dir="model
 
     # ── Composite training summary ──────────────────────────────────────────
     best_epoch_m = max(history, key=lambda h: h.get("f1", 0.0)) if history else {}
-    best_acc     = best_epoch_m.get("accuracy", 0.0)
     best_f1_hist = best_epoch_m.get("f1", 0.0)
     best_roc     = best_epoch_m.get("roc_auc", 0.0)
-    composite    = 0.2 * best_acc + 0.4 * best_f1_hist + 0.4 * best_roc
+    best_pr_auc  = best_epoch_m.get("pr_auc", 0.0)
+    composite    = fraud_composite_score(best_pr_auc, best_roc, best_f1_hist)
     print(f"[Trainer] Done. Best F1={best_f1:.4f}")
     print("\n" + "="*60)
-    print("  TRAINING COMPOSITE SCORE SUMMARY")
+    print("  TRAINING FRAUD-COMPOSITE SCORE SUMMARY")
     print("="*60)
-    print(f"  {'Accuracy':<22}: {best_acc:.4f}")
-    print(f"  {'F1 Score':<22}: {best_f1_hist:.4f}")
+    print(f"  {'PR-AUC':<22}: {best_pr_auc:.4f}")
     print(f"  {'ROC-AUC':<22}: {best_roc:.4f}")
-    print(f"  {'Composite Score':<22}: {composite:.4f}  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)")
+    print(f"  {'F1 Score':<22}: {best_f1_hist:.4f}")
+    print(f"  {'Fraud Composite':<22}: {composite:.4f}  (0.5×PR-AUC + 0.3×ROC-AUC + 0.2×F1)")
     print("="*60)
     return model, history

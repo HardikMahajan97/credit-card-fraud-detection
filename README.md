@@ -311,15 +311,49 @@ After training completes, the pipeline prints a full metrics report to stdout:
  fpr          : 0.0041
  threshold    : 0.3820
  confusion_matrix:
-              Pred 0    Pred 1
+               Pred 0    Pred 1
    Actual 0    7412        31
    Actual 1      53       138
 --------------------------------------------------------------
- composite    : 0.8479  (0.2×Acc + 0.4×F1 + 0.4×ROC-AUC)
+ Fraud-Focused KPIs:
+   precision@1%  : 1.0000
+   recall@FPR5%  : 0.9200
+   recall@P50%   : 0.8500
+--------------------------------------------------------------
+ fraud_composite: 0.8541  (0.5×PR-AUC + 0.3×ROC-AUC + 0.2×F1)
 ==============================================================
 ```
 
-The **composite** line is the combined summary mixing Accuracy (20%), F1 (40%) and ROC-AUC (40%).
+### Fraud-Robust Composite Score
+
+The **fraud_composite** score replaces the previous accuracy-weighted composite.
+It is designed for **highly imbalanced fraud datasets** where accuracy is
+dominated by the majority class and therefore misleading.
+
+**Formula:**
+
+```
+fraud_composite = 0.5 × PR-AUC + 0.3 × ROC-AUC + 0.2 × F1
+```
+
+| Component | Weight | Rationale |
+|-----------|--------|-----------|
+| PR-AUC    | 0.5    | Primary metric for imbalanced data — measures precision/recall trade-off across all thresholds, not dominated by true-negatives. |
+| ROC-AUC   | 0.3    | Overall ranking quality; threshold-independent. |
+| F1        | 0.2    | Threshold-specific harmonic mean of precision and recall. |
+| Accuracy  | 0 (excluded) | Excluded: misleading on imbalanced datasets (e.g., always predicting “not fraud” yields ~97% accuracy). |
+
+**Edge-case safety:** any NaN or inf input component is treated as 0.
+
+### Additional Fraud-Focused KPIs
+
+Three additional KPIs are printed alongside the composite score:
+
+| KPI | Definition | Why useful for fraud |
+|-----|-----------|----------------------|
+| `precision@1%` | Precision among the top 1% highest-scored transactions | Measures how well the model concentrates fraud at the very top — important when analysts can only review a small fraction. |
+| `recall@FPR5%` | Recall (fraud caught) when the false-positive rate is ≤ 5% | Quantifies how much fraud is caught before the alert load becomes operationally unacceptable. |
+| `recall@P50%` | Recall when precision is ≥ 50% | How much fraud is caught before precision drops below a practical alert-quality floor. |
 
 Per-epoch metrics are also printed during training, including `roc_auc`, `pr_auc`, `f1`, `accuracy`, and the tuned threshold.
 

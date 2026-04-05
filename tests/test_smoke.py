@@ -501,8 +501,210 @@ class TestArtifactPersistence:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Entry point (run without pytest)
+# Tests: Graph-RAG cosine similarity edge cases
 # ─────────────────────────────────────────────────────────────────────────────
+
+class TestCosineSimilarityEdgeCases:
+    """Verify _cosine_similarity handles degenerate inputs without NaN/inf."""
+
+    def _explainer(self):
+        from explainability.graph_rag import FraudExplainer
+        return FraudExplainer(embedding_dim=4)
+
+    def test_normal_vectors(self):
+        exp = self._explainer()
+        query  = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        memory = np.array([[1.0, 0.0, 0.0, 0.0],
+                           [0.0, 1.0, 0.0, 0.0]], dtype=np.float32)
+        sims = exp._cosine_similarity(query, memory)
+        assert sims.shape == (2,)
+        np.testing.assert_allclose(sims[0], 1.0, atol=1e-5)
+        np.testing.assert_allclose(sims[1], 0.0, atol=1e-5)
+
+    def test_zero_query_vector(self):
+        """Zero-norm query must return all-zero similarities (not NaN/inf)."""
+        exp = self._explainer()
+        query  = np.zeros(4, dtype=np.float32)
+        memory = np.random.randn(5, 4).astype(np.float32)
+        sims = exp._cosine_similarity(query, memory)
+        assert not np.isnan(sims).any(), "NaN in output for zero-norm query"
+        assert not np.isinf(sims).any(), "inf in output for zero-norm query"
+        np.testing.assert_array_equal(sims, np.zeros(5))
+
+    def test_zero_memory_rows(self):
+        """Zero-norm memory rows must yield similarity 0 (not NaN/inf)."""
+        exp = self._explainer()
+        query  = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        memory = np.array([[0.0, 0.0, 0.0, 0.0],
+                           [1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+        sims = exp._cosine_similarity(query, memory)
+        assert not np.isnan(sims).any()
+        assert not np.isinf(sims).any()
+        assert sims[0] == pytest.approx(0.0, abs=1e-6)
+        assert sims[1] == pytest.approx(1.0, abs=1e-5)
+
+    def test_nan_in_memory(self):
+        """NaN values in memory must be sanitized (result finite, in [-1,1])."""
+        exp = self._explainer()
+        query  = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        memory = np.array([[np.nan, 1.0, 0.0, 0.0],
+                           [1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+        sims = exp._cosine_similarity(query, memory)
+        assert not np.isnan(sims).any()
+        assert not np.isinf(sims).any()
+        assert (sims >= -1.0).all() and (sims <= 1.0).all()
+
+    def test_inf_in_memory(self):
+        """inf values in memory must be sanitized (result finite, in [-1,1])."""
+        exp = self._explainer()
+        query  = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        memory = np.array([[np.inf, 0.0, 0.0, 0.0],
+                           [1.0,    0.0, 0.0, 0.0]], dtype=np.float32)
+        sims = exp._cosine_similarity(query, memory)
+        assert not np.isnan(sims).any()
+        assert not np.isinf(sims).any()
+        assert (sims >= -1.0).all() and (sims <= 1.0).all()
+
+    def test_extremely_large_values(self):
+        """Extremely large values must not overflow (result finite, in [-1,1])."""
+        exp = self._explainer()
+        large = np.float32(1e38)
+        query  = np.array([large, large, 0.0, 0.0], dtype=np.float32)
+        memory = np.array([[large, large, 0.0, 0.0],
+                           [0.0,   large, 0.0, 0.0]], dtype=np.float32)
+        sims = exp._cosine_similarity(query, memory)
+        assert not np.isnan(sims).any(), "NaN for large-magnitude vectors"
+        assert not np.isinf(sims).any(), "inf for large-magnitude vectors"
+        assert (sims >= -1.0).all() and (sims <= 1.0).all()
+
+    def test_add_to_memory_with_nan_embeddings(self):
+        """add_to_memory must not raise when embeddings contain NaN/inf."""
+        import torch
+        from explainability.graph_rag import FraudExplainer
+
+        exp = FraudExplainer(embedding_dim=4)
+        embs = torch.tensor([[np.nan, 0.0, 0.0, 0.0],
+                              [np.inf, 0.0, 0.0, 0.0],
+                              [1.0,    1.0, 1.0, 1.0]], dtype=torch.float32)
+        labels = torch.tensor([1.0, 1.0, 0.0])
+        meta   = [{"id": i} for i in range(3)]
+        exp.add_to_memory(embs, meta, labels)
+        # stored embeddings must be finite
+        for stored in exp.fraud_embeddings:
+            assert np.isfinite(stored).all(), "Stored fraud embedding contains non-finite"
+
+    def test_retrieve_returns_finite_similarities(self):
+        """retrieve_similar_fraud must always return finite similarity values."""
+        import torch
+        from explainability.graph_rag import FraudExplainer
+
+        exp = FraudExplainer(embedding_dim=4, top_k=3)
+        embs   = torch.randn(10, 4)
+        labels = torch.ones(10)
+        meta   = [{"id": i} for i in range(10)]
+        exp.add_to_memory(embs, meta, labels)
+
+        # Test with zero query
+        query = np.zeros(4, dtype=np.float32)
+        results = exp.retrieve_similar_fraud(query)
+        for r in results:
+            assert np.isfinite(r["similarity"]), "Non-finite similarity in retrieval"
+
+        # Test with NaN query
+        query_nan = np.array([np.nan, 1.0, 0.0, 0.0], dtype=np.float32)
+        results2 = exp.retrieve_similar_fraud(query_nan)
+        for r in results2:
+            assert np.isfinite(r["similarity"]), "Non-finite similarity for NaN query"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests: Fraud-focused evaluation KPIs
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFraudKPIs:
+    """Verify fraud_kpis and fraud_composite_score correctness and edge cases."""
+
+    def test_basic_kpis(self):
+        from training.trainer import fraud_kpis
+
+        y_true = np.array([0, 0, 0, 0, 0, 0, 0, 0, 1, 1])
+        y_prob = np.array([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.9, 0.8])
+        kpis = fraud_kpis(y_true, y_prob)
+        assert "precision_at_k" in kpis
+        assert "recall_at_fpr5pct" in kpis
+        assert "recall_at_precision50pct" in kpis
+        assert "pr_auc" in kpis
+        assert 0.0 <= kpis["precision_at_k"] <= 1.0
+        assert 0.0 <= kpis["recall_at_fpr5pct"] <= 1.0
+        assert 0.0 <= kpis["recall_at_precision50pct"] <= 1.0
+        assert 0.0 <= kpis["pr_auc"] <= 1.0
+
+    def test_precision_at_k_top_ranked(self):
+        """When top-k are all fraud, precision@k should be 1.0."""
+        from training.trainer import fraud_kpis
+
+        # 10 samples: top 1% = 1 sample; ensure that sample is fraud
+        y_true = np.array([0]*9 + [1])
+        y_prob = np.array([0.1]*9 + [0.95])
+        kpis = fraud_kpis(y_true, y_prob, top_k_frac=0.1)  # top 10% = 1 sample
+        assert kpis["precision_at_k"] == pytest.approx(1.0)
+
+    def test_no_positives_edge_case(self):
+        """All-negative labels: KPIs must be 0 or safe fallbacks, not raise."""
+        from training.trainer import fraud_kpis
+
+        y_true = np.zeros(20, dtype=int)
+        y_prob = np.random.rand(20)
+        kpis = fraud_kpis(y_true, y_prob)
+        assert kpis["pr_auc"] == 0.0
+        assert kpis["recall_at_fpr5pct"] == 0.0
+        assert kpis["recall_at_precision50pct"] == 0.0
+
+    def test_all_positives_edge_case(self):
+        """All-positive labels: must not raise."""
+        from training.trainer import fraud_kpis
+
+        y_true = np.ones(20, dtype=int)
+        y_prob = np.random.rand(20)
+        kpis = fraud_kpis(y_true, y_prob)
+        assert 0.0 <= kpis["precision_at_k"] <= 1.0
+
+    def test_composite_score_standard(self):
+        from training.trainer import fraud_composite_score
+
+        score = fraud_composite_score(pr_auc=0.6, roc_auc=0.8, f1=0.5)
+        expected = 0.5 * 0.6 + 0.3 * 0.8 + 0.2 * 0.5
+        assert score == pytest.approx(expected, rel=1e-5)
+
+    def test_composite_score_nan_safe(self):
+        """NaN/inf inputs must be treated as 0, not propagate."""
+        from training.trainer import fraud_composite_score
+
+        score = fraud_composite_score(pr_auc=float("nan"), roc_auc=0.8, f1=0.5)
+        assert np.isfinite(score), "Composite score should be finite when input is NaN"
+        score2 = fraud_composite_score(pr_auc=float("inf"), roc_auc=0.5, f1=0.4)
+        assert np.isfinite(score2)
+
+    def test_composite_score_all_zeros(self):
+        from training.trainer import fraud_composite_score
+
+        assert fraud_composite_score(0.0, 0.0, 0.0) == pytest.approx(0.0)
+
+    def test_composite_score_all_ones(self):
+        from training.trainer import fraud_composite_score
+
+        assert fraud_composite_score(1.0, 1.0, 1.0) == pytest.approx(1.0)
+
+    def test_kpis_keys_present(self):
+        from training.trainer import fraud_kpis
+
+        y_true = np.array([0, 1, 0, 1, 0])
+        y_prob = np.array([0.1, 0.8, 0.2, 0.9, 0.3])
+        kpis = fraud_kpis(y_true, y_prob)
+        for key in ("precision_at_k", "recall_at_fpr5pct",
+                    "recall_at_precision50pct", "pr_auc"):
+            assert key in kpis, f"Missing KPI key: {key}"
+
 
 if __name__ == "__main__":
     import traceback
@@ -516,6 +718,8 @@ if __name__ == "__main__":
         TestMergeDatasets,
         TestCLIParsing,
         TestArtifactPersistence,
+        TestCosineSimilarityEdgeCases,
+        TestFraudKPIs,
     ]
     passed = 0
     failed = 0
