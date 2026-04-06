@@ -35,7 +35,7 @@ CONFIG = {
     "hidden_dim": 256,
     "dropout": 0.3,
     "use_anomaly_heads": True,
-    "epochs": 60,  # increased from 20 to give added velocity features and multimodal fusion enough convergence room
+    "epochs": 25,  # increased from 20 to give added velocity features and multimodal fusion enough convergence room
     "batch_size": 256,
     "lr": 5e-4,  # slightly lower LR; 1e-3 was causing unstable gradients at epoch 1
     "weight_decay": 5e-4,
